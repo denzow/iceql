@@ -99,7 +99,13 @@ def run_insert(catalog: Catalog, ast: exp.Insert) -> StatementResult:
     new_values: list[list[Value]] = []
     if isinstance(source, exp.Values):
         for tup in source.expressions:
-            new_values.append([_eval_constant(e) for e in tup.expressions])
+            try:
+                new_values.append([_eval_constant(e) for e in tup.expressions])
+            except NotSupportedError:
+                # 定数以外(式や CURRENT_DATE 等)は SELECT に還元して評価する
+                select = exp.Select(expressions=[e.copy() for e in tup.expressions])
+                _, rows_ = executor.evaluate(select, {}, {})
+                new_values.append(list(rows_[0]))
     elif isinstance(source, (exp.Select, exp.Union, exp.Except, exp.Intersect)):
         result = executor.run_select(catalog, source)
         new_values.extend(list(row) for row in result.rows)

@@ -12,6 +12,7 @@ sqlglot.executor は次の制約があるため、ORDER BY / LIMIT / OFFSET は
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime, time
 
 from sqlglot import exp
 from sqlglot.errors import ExecuteError, OptimizeError, SqlglotError
@@ -24,11 +25,27 @@ from iceql.errors import NotSupportedError, OperationalError, ProgrammingError
 from iceql.storage import Row
 from iceql.types import Value
 
+
+def _to_datetime(value: object) -> datetime:
+    """ISO 文字列(iceql の date/datetime 内部表現)を datetime に変換する。"""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, time())
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    raise OperationalError(f"cannot interpret {value!r} as a datetime")
+
+
 # sqlglot.executor の実行環境に足りない SQLite 系の関数を補う
 ENV.setdefault("LENGTH", null_if_any(lambda x: len(x)))  # type: ignore[no-untyped-call]
 ENV.setdefault("REPLACE", null_if_any(lambda s, old, new: s.replace(old, new)))  # type: ignore[no-untyped-call]
 ENV.setdefault("DPIPE", null_if_any(lambda *xs: "".join(str(x) for x in xs)))  # type: ignore[no-untyped-call]
 ENV.setdefault("NULLIF", lambda a, b: None if a == b else a)
+ENV.setdefault("NOW", datetime.now)
+# STRFTIME(fmt, value) は TIMETOSTR(TSORDSTOTIMESTAMP(value), fmt) に展開される
+ENV.setdefault("TSORDSTOTIMESTAMP", null_if_any(_to_datetime))  # type: ignore[no-untyped-call]
+ENV.setdefault("TIMETOSTR", null_if_any(lambda v, fmt: _to_datetime(v).strftime(fmt)))  # type: ignore[no-untyped-call]
 
 # executor に渡すスキーマ注釈。date/datetime は ISO 文字列のまま比較するので text
 _SQLGLOT_TYPES = {

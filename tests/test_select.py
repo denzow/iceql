@@ -141,6 +141,25 @@ class TestFunctions:
     def test_like(self, conn):
         assert q(conn, "SELECT name FROM users WHERE name LIKE 'a%'") == [("alice",)]
 
+    def test_current_date_and_now(self, conn):
+        from datetime import date, datetime
+
+        (today,) = q(conn, "SELECT CURRENT_DATE")[0]
+        assert str(today) == date.today().isoformat()
+        (now,) = q(conn, "SELECT NOW()")[0]
+        assert isinstance(now, (datetime, str))
+
+    def test_strftime_on_column(self, conn):
+        rows = q(
+            conn,
+            "SELECT STRFTIME('%Y', joined) FROM users WHERE joined IS NOT NULL ORDER BY id",
+        )
+        assert rows == [("2020",), ("2021",), ("2019",)]
+
+    def test_cast(self, conn):
+        assert q(conn, "SELECT CAST('42' AS INTEGER) + 1") == [(43,)]
+        assert q(conn, "SELECT CAST(age AS TEXT) FROM users WHERE id = 1") == [("30",)]
+
 
 class TestErrors:
     def test_no_such_table(self, conn):

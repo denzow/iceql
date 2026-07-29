@@ -3,7 +3,6 @@ import pytest
 from iceql.errors import (
     DataError,
     IntegrityError,
-    NotSupportedError,
     ProgrammingError,
 )
 
@@ -89,9 +88,18 @@ class TestInsert:
                 "INSERT INTO users (id, name, joined) VALUES (12, 'x', 'not-a-date')"
             )
 
-    def test_expression_in_values_rejected(self, conn):
-        with pytest.raises(NotSupportedError, match="constant"):
-            conn.execute("INSERT INTO depts (id, dept) VALUES (1 + 2, 'x')")
+    def test_expression_in_values(self, conn):
+        conn.execute("INSERT INTO depts (id, dept) VALUES (1 + 2, UPPER('hr'))")
+        assert (3, "HR") in all_rows(conn, "depts")
+
+    def test_current_date_in_values(self, conn):
+        from datetime import date
+
+        conn.execute(
+            "INSERT INTO users (id, name, joined) VALUES (20, 'noa', CURRENT_DATE)"
+        )
+        row = conn.execute("SELECT joined FROM users WHERE id = 20").fetchone()
+        assert row == (date.today().isoformat(),)
 
 
 class TestUpdate:
