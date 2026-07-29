@@ -1,6 +1,6 @@
 [project]
 name = "iceql"
-version = "0.1.1"
+version = "0.1.2"
 description = "A lightweight local RDBMS with plaintext (CSV + YAML) storage, readable by humans, LLMs, and git diff"
 readme = "README.md"
 authors = [
