@@ -52,18 +52,34 @@ columns:
 null_marker: \N
 ```
 
-引数なしで起動すると REPL になる。
+引数なしで起動すると psql 風の REPL になる。
 
 ```console
 $ iceql mydb
-iceql> SELECT COUNT(*) FROM users;
+iceql (0.1.1)
+Type "\?" for help.
+mydb=# SELECT COUNT(*) FROM users;
 _col_0
 ------
 2
-iceql> .tables
-users
-iceql> .quit
+mydb=# \d
+List of tables
+  users
+mydb=# \x
+Expanded display is on.
+mydb=# SELECT * FROM users;
+-[ RECORD 1 ]-
+id   | 1
+name | alice
+age  | 30
+-[ RECORD 2 ]-
+id   | 2
+name | bob
+age  |
+mydb=# \q
 ```
+
+メタコマンドは `\d [table]`（テーブル一覧・スキーマ表示）、`\x`（拡張表示の切り替え）、`\pset format table|csv|json`、`\?`（ヘルプ）、`\q`（終了）。
 
 `-f table|csv|json` で出力形式を選べる（既定は TTY なら table、パイプなら csv）。
 `iceql check mydb` はスキーマと CSV の整合性（型、NOT NULL、主キー重複、正規形）を検証し、問題があれば非ゼロで終了する。

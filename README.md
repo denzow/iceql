@@ -52,18 +52,34 @@ columns:
 null_marker: \N
 ```
 
-Running without arguments opens a REPL.
+Running without arguments opens a psql-style REPL.
 
 ```console
 $ iceql mydb
-iceql> SELECT COUNT(*) FROM users;
+iceql (0.1.1)
+Type "\?" for help.
+mydb=# SELECT COUNT(*) FROM users;
 _col_0
 ------
 2
-iceql> .tables
-users
-iceql> .quit
+mydb=# \d
+List of tables
+  users
+mydb=# \x
+Expanded display is on.
+mydb=# SELECT * FROM users;
+-[ RECORD 1 ]-
+id   | 1
+name | alice
+age  | 30
+-[ RECORD 2 ]-
+id   | 2
+name | bob
+age  |
+mydb=# \q
 ```
+
+Meta commands: `\d [table]` (list / describe tables), `\x` (toggle expanded output), `\pset format table|csv|json`, `\?` (help), and `\q` (quit).
 
 `-f table|csv|json` selects the output format (defaults to table on a TTY, csv when piped).
 `iceql check mydb` validates schema/CSV consistency (types, NOT NULL, duplicate primary keys, canonical form) and exits non-zero on errors.

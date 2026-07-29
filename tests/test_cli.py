@@ -80,33 +80,82 @@ class TestRepl:
         stdin = (
             "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT);\n"
             "INSERT INTO t VALUES (1, 'alice');\n"
-            ".tables\n"
+            "\\d\n"
             "SELECT name FROM t;\n"
-            ".quit\n"
+            "\\q\n"
         )
         result = runner.invoke(main, [dbdir, "-f", "csv"], input=stdin)
         assert result.exit_code == 0, result.output
-        assert "t\n" in result.output
+        assert "List of tables\n  t\n" in result.output
         assert "name\nalice\n" in result.output
 
+    def test_repl_describe_table(self, runner, dbdir):
+        stdin = "CREATE TABLE t (id INTEGER PRIMARY KEY);\n\\d t\n\\q\n"
+        result = runner.invoke(main, [dbdir, "-f", "csv"], input=stdin)
+        assert result.exit_code == 0, result.output
+        assert "table: t" in result.output
+
     def test_repl_multiline_statement(self, runner, dbdir):
-        stdin = "CREATE TABLE t (id INTEGER);\nSELECT 1\nAS x;\n.quit\n"
+        stdin = "CREATE TABLE t (id INTEGER);\nSELECT 1\nAS x;\n\\q\n"
         result = runner.invoke(main, [dbdir, "-f", "csv"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "x\n1\n" in result.output
 
     def test_repl_error_continues(self, runner, dbdir):
-        stdin = "SELECT * FROM missing;\nSELECT 2 AS y;\n.quit\n"
+        stdin = "SELECT * FROM missing;\nSELECT 2 AS y;\n\\q\n"
         result = runner.invoke(main, [dbdir, "-f", "csv"], input=stdin)
         assert result.exit_code == 0
         assert "no such table" in result.output
         assert "y\n2\n" in result.output
 
     def test_repl_subcommand(self, runner, dbdir):
-        stdin = "SELECT 1 AS one;\n.quit\n"
+        stdin = "SELECT 1 AS one;\n\\q\n"
         result = runner.invoke(main, ["repl", dbdir, "-f", "csv"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "one\n1\n" in result.output
+
+    def test_repl_exit_word(self, runner, dbdir):
+        result = runner.invoke(main, [dbdir], input="exit\n")
+        assert result.exit_code == 0
+
+    def test_repl_expanded_display(self, runner, dbdir):
+        stdin = (
+            "CREATE TABLE t (id INTEGER, name TEXT);\n"
+            "INSERT INTO t VALUES (1, 'alice');\n"
+            "\\x\n"
+            "SELECT * FROM t;\n"
+            "\\q\n"
+        )
+        result = runner.invoke(main, [dbdir], input=stdin)
+        assert result.exit_code == 0, result.output
+        assert "Expanded display is on." in result.output
+        assert "-[ RECORD 1 ]-" in result.output
+        assert "id   | 1" in result.output
+        assert "name | alice" in result.output
+
+    def test_repl_pset_format(self, runner, dbdir):
+        stdin = (
+            "CREATE TABLE t (id INTEGER);\n"
+            "INSERT INTO t VALUES (7);\n"
+            "\\pset format json\n"
+            "SELECT * FROM t;\n"
+            "\\q\n"
+        )
+        result = runner.invoke(main, [dbdir], input=stdin)
+        assert result.exit_code == 0, result.output
+        assert "Output format is json." in result.output
+        assert '{"id": 7}' in result.output
+
+    def test_repl_invalid_backslash_command(self, runner, dbdir):
+        result = runner.invoke(main, [dbdir], input="\\foo\n\\q\n")
+        assert result.exit_code == 0
+        assert "invalid command \\foo" in result.output
+
+    def test_repl_psql_prompt(self, runner, tmp_path):
+        dbdir = str(tmp_path / "mydb")
+        result = runner.invoke(main, [dbdir], input="\\q\n")
+        assert result.exit_code == 0
+        assert "mydb=#" in result.output
 
 
 class TestInitAndCheck:

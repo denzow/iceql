@@ -6,6 +6,7 @@ import contextlib
 import json
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import click
 import sqlglot
@@ -65,12 +66,26 @@ def _print_json(result: StatementResult) -> None:
         click.echo(json.dumps(obj, ensure_ascii=False))
 
 
-def _print_result(result: StatementResult, fmt: str, *, feedback: bool) -> None:
+def _print_expanded(result: StatementResult) -> None:
+    """psql の \\x に相当する縦持ち表示。"""
+    assert result.columns is not None
+    width = max((len(c) for c in result.columns), default=0)
+    for i, row in enumerate(result.rows, start=1):
+        click.echo(f"-[ RECORD {i} ]-")
+        for col, value in zip(result.columns, row, strict=True):
+            click.echo(f"{col.ljust(width)} | {_format_value(value, null='')}")
+
+
+def _print_result(
+    result: StatementResult, fmt: str, *, feedback: bool, expanded: bool = False
+) -> None:
     if result.columns is None:
         if feedback and result.rowcount >= 0:
             click.echo(f"({result.rowcount} rows affected)", err=True)
         return
-    if fmt == "table":
+    if expanded:
+        _print_expanded(result)
+    elif fmt == "table":
         _print_table(result)
     elif fmt == "csv":
         _print_csv(result)
@@ -78,7 +93,9 @@ def _print_result(result: StatementResult, fmt: str, *, feedback: bool) -> None:
         _print_json(result)
 
 
-def _run_script(conn: iceql.Connection, sql: str, fmt: str, *, feedback: bool) -> None:
+def _run_script(
+    conn: iceql.Connection, sql: str, fmt: str, *, feedback: bool, expanded: bool = False
+) -> None:
     """複数文を含みうる SQL 文字列を順に実行して結果を出力する。"""
     try:
         statements = [s for s in sqlglot.parse(sql, read=SQL_DIALECT) if s is not None]
@@ -87,7 +104,7 @@ def _run_script(conn: iceql.Connection, sql: str, fmt: str, *, feedback: bool) -
     for statement in statements:
         assert isinstance(statement, sqlglot.exp.Expression)
         result = conn._execute_ast(statement)
-        _print_result(result, fmt, feedback=feedback)
+        _print_result(result, fmt, feedback=feedback, expanded=expanded)
 
 
 class DefaultToShellGroup(click.Group):
@@ -166,24 +183,38 @@ def repl(dbdir: Path, fmt: str) -> None:
         conn.close()
 
 
-def _repl(conn: iceql.Connection, fmt: str) -> None:
-    try:
-        import readline
+class _ReplState:
+    def __init__(self, fmt: str) -> None:
+        self.fmt = fmt
+        self.expanded = False
+        self.quit = False
 
-        histfile: Path | None = Path.home() / ".iceql_history"
-        assert histfile is not None
-        with contextlib.suppress(OSError):
-            readline.read_history_file(histfile)
-    except ImportError:  # readline が無い環境でも REPL 自体は動かす
-        readline = None  # type: ignore[assignment]
-        histfile = None
-    click.echo(f"iceql {iceql.__version__} — connected to {conn._catalog.root}")
-    click.echo(
-        'Terminate SQL statements with ";". Type ".help" for meta commands, ".quit" to exit.'
-    )
+
+def _repl(conn: iceql.Connection, fmt: str) -> None:
+    # 履歴は対話利用(TTY)のときだけ扱う。パイプやテストで readline の
+    # プロセス内履歴に read_history_file が「追記」される仕様のまま書き戻すと、
+    # 履歴ファイルが読み書きのたびに倍々で膨らんでしまう
+    histfile: Path | None = None
+    readline: ModuleType | None = None
+    if sys.stdin.isatty():
+        try:
+            import readline as _readline
+
+            _readline.clear_history()
+            _readline.set_history_length(1000)
+            histfile = Path.home() / ".iceql_history"
+            with contextlib.suppress(OSError):
+                _readline.read_history_file(histfile)
+            readline = _readline
+        except ImportError:  # readline が無い環境でも REPL 自体は動かす
+            histfile = None
+    click.echo(f"iceql ({iceql.__version__})")
+    click.echo('Type "\\?" for help.')
+    state = _ReplState(fmt)
+    dbname = conn._catalog.root.name
     buffer = ""
-    while True:
-        prompt = "iceql> " if not buffer else "  ...> "
+    while not state.quit:
+        prompt = f"{dbname}=# " if not buffer else f"{dbname}-# "
         try:
             line = input(prompt)
         except EOFError:
@@ -193,12 +224,16 @@ def _repl(conn: iceql.Connection, fmt: str) -> None:
             buffer = ""
             click.echo("")
             continue
-        if not buffer and line.strip().startswith("."):
-            new_fmt = _run_meta(conn, line.strip(), fmt)
-            if new_fmt is None:
+        stripped = line.strip()
+        if not buffer:
+            if stripped.startswith("\\"):
+                _run_backslash(conn, stripped, state)
+                continue
+            if stripped in ("exit", "quit"):
                 break
-            fmt = new_fmt
-            continue
+            if stripped == "help":
+                _print_backslash_help()
+                continue
         buffer += line + "\n"
         if not buffer.strip():
             buffer = ""
@@ -207,7 +242,7 @@ def _repl(conn: iceql.Connection, fmt: str) -> None:
             continue
         sql, buffer = buffer, ""
         try:
-            _run_script(conn, sql, fmt, feedback=True)
+            _run_script(conn, sql, state.fmt, feedback=True, expanded=state.expanded)
         except Error as exc:
             click.echo(f"error: {exc}", err=True)
     if readline is not None and histfile is not None:
@@ -215,40 +250,57 @@ def _repl(conn: iceql.Connection, fmt: str) -> None:
             readline.write_history_file(histfile)
 
 
-def _run_meta(conn: iceql.Connection, line: str, fmt: str) -> str | None:
-    """メタコマンドを処理する。戻り値は新しい出力形式(終了時は None)。"""
+def _print_backslash_help() -> None:
+    click.echo(
+        "General\n"
+        "  \\q                   quit iceql\n"
+        "Informational\n"
+        "  \\d [TABLE]           list tables, or describe a table (YAML schema)\n"
+        "  \\dt                  list tables\n"
+        "Formatting\n"
+        "  \\x                   toggle expanded output\n"
+        "  \\pset format FORMAT  set output format (table/csv/json)"
+    )
+
+
+def _list_tables(conn: iceql.Connection) -> None:
+    tables = conn._catalog.list_tables()
+    if not tables:
+        click.echo("No tables found.")
+        return
+    click.echo("List of tables")
+    for name in tables:
+        click.echo(f"  {name}")
+
+
+def _run_backslash(conn: iceql.Connection, line: str, state: _ReplState) -> None:
+    """psql 風のバックスラッシュコマンドを処理する。"""
     parts = line.split()
     cmd, args = parts[0], parts[1:]
-    if cmd in (".quit", ".exit"):
-        return None
-    if cmd == ".help":
-        click.echo(
-            ".tables          list tables\n"
-            ".schema <table>  show the schema (YAML) of a table\n"
-            ".format <fmt>    change the output format (table/csv/json)\n"
-            ".quit            exit"
-        )
-    elif cmd == ".tables":
-        for name in conn._catalog.list_tables():
-            click.echo(name)
-    elif cmd == ".schema":
-        if not args:
-            click.echo("usage: .schema <table>", err=True)
-        else:
+    if cmd == "\\q":
+        state.quit = True
+    elif cmd == "\\?":
+        _print_backslash_help()
+    elif cmd in ("\\d", "\\dt"):
+        if cmd == "\\d" and args:
             try:
                 path = conn._catalog.schema_path(args[0])
                 click.echo(path.read_text(encoding="utf-8"), nl=False)
-            except (Error, OSError) as exc:
-                click.echo(f"error: {exc}", err=True)
-    elif cmd == ".format":
-        if args and args[0] in FORMATS:
-            fmt = args[0]
-            click.echo(f"format: {fmt}", err=True)
+            except (Error, OSError):
+                click.echo(f'Did not find any table named "{args[0]}".', err=True)
         else:
-            click.echo(f"usage: .format {{{'|'.join(FORMATS)}}}", err=True)
+            _list_tables(conn)
+    elif cmd == "\\x":
+        state.expanded = not state.expanded
+        click.echo(f"Expanded display is {'on' if state.expanded else 'off'}.")
+    elif cmd == "\\pset":
+        if len(args) == 2 and args[0] == "format" and args[1] in FORMATS:
+            state.fmt = args[1]
+            click.echo(f"Output format is {state.fmt}.")
+        else:
+            click.echo(f"\\pset: usage: \\pset format {{{'|'.join(FORMATS)}}}", err=True)
     else:
-        click.echo(f"unknown meta command: {cmd} (try .help)", err=True)
-    return fmt
+        click.echo(f"invalid command {cmd}. Try \\? for help.", err=True)
 
 
 @main.command()
