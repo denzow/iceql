@@ -7,6 +7,9 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      # PyPI の Trusted Publishing (OIDC) に必要
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -15,4 +18,4 @@ jobs:
       - name: Build
         run: uv build
       - name: Publish
-        run: uv publish --token ${{ secrets.PYPI_API_TOKEN }}
+        run: uv publish --trusted-publishing always
