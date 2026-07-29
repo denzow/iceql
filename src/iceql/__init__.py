@@ -1,5 +1,7 @@
 """iceql: ストレージが平文(CSV + YAML)のローカル RDBMS。"""
 
+from importlib.metadata import PackageNotFoundError, version
+
 from iceql.api import Connection, Cursor, connect
 from iceql.errors import (
     DatabaseError,
@@ -14,7 +16,11 @@ from iceql.errors import (
     Warning,
 )
 
-__version__ = "0.1.0"
+# バージョンは pyproject.toml が唯一の情報源
+try:
+    __version__ = version("iceql")
+except PackageNotFoundError:  # 未インストールのソースツリーから import された場合
+    __version__ = "0.0.0"
 
 # DB-API 2.0 モジュール属性
 apilevel = "2.0"
