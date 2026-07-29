@@ -9,11 +9,28 @@ authors = [
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
+keywords = ["database", "sql", "csv", "sqlite", "llm", "plaintext"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Database :: Database Engines/Servers",
+]
 dependencies = [
     "sqlglot>=27.0",
     "pyyaml>=6.0",
     "click>=8.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/denzow/iceql"
+Repository = "https://github.com/denzow/iceql"
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.0"]
