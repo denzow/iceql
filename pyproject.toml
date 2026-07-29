@@ -1,0 +1,52 @@
+[project]
+name = "iceql"
+version = "0.1.0"
+description = "A lightweight local RDBMS with plaintext (CSV + YAML) storage, readable by humans, LLMs, and git diff"
+readme = "README.md"
+authors = [
+    { name = "denzow", email = "denzow@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "sqlglot>=27.0",
+    "pyyaml>=6.0",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+
+[project.scripts]
+iceql = "iceql.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "hypothesis>=6.100",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "types-pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.6,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src/iceql"]
+
+[[tool.mypy.overrides]]
+module = ["sqlglot.*", "mcp.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
