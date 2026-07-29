@@ -102,25 +102,34 @@ class DefaultToShellGroup(click.Group):
             return "shell", self.commands["shell"], args
 
 
+_FORMAT_OPTION_HELP = "Output format (default: table on a TTY, csv when piped)"
+
+
 @click.group(cls=DefaultToShellGroup, invoke_without_command=False)
 @click.version_option(iceql.__version__)
 def main() -> None:
-    """iceql: a local RDBMS with plaintext (CSV + YAML) storage."""
+    """iceql: a local RDBMS with plaintext (CSV + YAML) storage.
+
+    Running `iceql DBDIR` opens an interactive REPL; add -c to run SQL and exit.
+    """
 
 
 @main.command()
 @click.argument("dbdir", type=click.Path(path_type=Path))
-@click.option("-c", "--command", "commands", multiple=True, help="SQL を実行して終了する")
+@click.option("-c", "--command", "commands", multiple=True, help="Run SQL and exit (repeatable)")
 @click.option(
     "-f",
     "--format",
     "fmt",
     type=click.Choice(FORMATS),
     default=None,
-    help="出力形式(既定: TTY なら table、パイプなら csv)",
+    help=_FORMAT_OPTION_HELP,
 )
 def shell(dbdir: Path, commands: tuple[str, ...], fmt: str | None) -> None:
-    """DB ディレクトリに接続して REPL を開くか、-c の SQL を実行する。"""
+    """Connect to DBDIR and open a REPL, or run SQL given with -c.
+
+    This is the default command: `iceql DBDIR` is equivalent to `iceql shell DBDIR`.
+    """
     if fmt is None:
         fmt = "table" if sys.stdout.isatty() else "csv"
     conn = iceql.connect(dbdir)
@@ -137,6 +146,26 @@ def shell(dbdir: Path, commands: tuple[str, ...], fmt: str | None) -> None:
         conn.close()
 
 
+@main.command()
+@click.argument("dbdir", type=click.Path(path_type=Path))
+@click.option(
+    "-f",
+    "--format",
+    "fmt",
+    type=click.Choice(FORMATS),
+    default="table",
+    show_default=True,
+    help="Output format",
+)
+def repl(dbdir: Path, fmt: str) -> None:
+    """Connect to DBDIR and open an interactive REPL."""
+    conn = iceql.connect(dbdir)
+    try:
+        _repl(conn, fmt)
+    finally:
+        conn.close()
+
+
 def _repl(conn: iceql.Connection, fmt: str) -> None:
     try:
         import readline
@@ -149,7 +178,9 @@ def _repl(conn: iceql.Connection, fmt: str) -> None:
         readline = None  # type: ignore[assignment]
         histfile = None
     click.echo(f"iceql {iceql.__version__} — connected to {conn._catalog.root}")
-    click.echo('SQL 文は ";" で終端。".help" でメタコマンド一覧、".quit" で終了。')
+    click.echo(
+        'Terminate SQL statements with ";". Type ".help" for meta commands, ".quit" to exit.'
+    )
     buffer = ""
     while True:
         prompt = "iceql> " if not buffer else "  ...> "
@@ -192,10 +223,10 @@ def _run_meta(conn: iceql.Connection, line: str, fmt: str) -> str | None:
         return None
     if cmd == ".help":
         click.echo(
-            ".tables          テーブル一覧\n"
-            ".schema <table>  スキーマ(YAML)を表示\n"
-            ".format <fmt>    出力形式を変更 (table/csv/json)\n"
-            ".quit            終了"
+            ".tables          list tables\n"
+            ".schema <table>  show the schema (YAML) of a table\n"
+            ".format <fmt>    change the output format (table/csv/json)\n"
+            ".quit            exit"
         )
     elif cmd == ".tables":
         for name in conn._catalog.list_tables():
@@ -223,7 +254,7 @@ def _run_meta(conn: iceql.Connection, line: str, fmt: str) -> str | None:
 @main.command()
 @click.argument("dbdir", type=click.Path(path_type=Path))
 def check(dbdir: Path) -> None:
-    """スキーマと CSV の整合性を検証する。問題があれば非ゼロで終了する。"""
+    """Validate schema/CSV consistency. Exits non-zero if errors are found."""
     from iceql.check import check_database
 
     issues = check_database(dbdir)
@@ -238,16 +269,16 @@ def check(dbdir: Path) -> None:
 @main.command()
 @click.argument("dbdir", type=click.Path(path_type=Path))
 def init(dbdir: Path) -> None:
-    """空の DB ディレクトリを作成する。"""
+    """Create an empty database directory."""
     catalog = init_database(dbdir)
     click.echo(f"initialized empty database at {catalog.root}")
 
 
 @main.command()
 @click.argument("dbdir", type=click.Path(path_type=Path))
-@click.option("--read-only", is_flag=True, help="書き込み系ツール(execute)を無効にする")
+@click.option("--read-only", is_flag=True, help="Disable write tools (execute)")
 def mcp(dbdir: Path, read_only: bool) -> None:
-    """MCP サーバーとして起動する(stdio)。要 iceql[mcp]。"""
+    """Run as an MCP server (stdio). Requires iceql[mcp]."""
     from iceql.mcp_server import create_server
 
     try:

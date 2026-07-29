@@ -102,6 +102,12 @@ class TestRepl:
         assert "no such table" in result.output
         assert "y\n2\n" in result.output
 
+    def test_repl_subcommand(self, runner, dbdir):
+        stdin = "SELECT 1 AS one;\n.quit\n"
+        result = runner.invoke(main, ["repl", dbdir, "-f", "csv"], input=stdin)
+        assert result.exit_code == 0, result.output
+        assert "one\n1\n" in result.output
+
 
 class TestInitAndCheck:
     def test_init(self, runner, dbdir):
