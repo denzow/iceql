@@ -1,22 +1,24 @@
 # iceql
 
-ストレージに平文（CSV + YAML）を使うローカル RDBMS。
-SQLite のように 1 ディレクトリで完結し、SQL で読み書きできる。
+[日本語版 README](README_ja.md)
 
-SQLite のデータベースファイルはバイナリなので、LLM にそのまま渡して内容を読ませることができない。
-iceql はテーブルを CSV、スキーマを YAML で保存するため、LLM も人間もストレージを直接読める。
-書き込みは常に正規形（LF、最小クォート、1 行 1 レコード）で行われるので、git diff で変更履歴を追える。
+A local RDBMS with plaintext storage (CSV + YAML).
+Like SQLite, a database is self-contained and queryable with SQL — but the storage stays human-readable.
 
-## インストール
+SQLite database files are binary, so you cannot hand one to an LLM and have it read the contents directly.
+iceql stores tables as CSV and schemas as YAML, so both LLMs and humans can read the storage as-is.
+Writes always produce a canonical form (LF newlines, minimal quoting, one record per line), which keeps git diffs clean and meaningful.
+
+## Installation
 
 ```console
-$ uv tool install iceql   # CLI として使う場合
-$ uv add iceql            # ライブラリとして使う場合
+$ uv tool install iceql   # as a CLI
+$ uv add iceql            # as a library
 ```
 
-## クイックスタート
+## Quick start
 
-データベースはただのディレクトリである。
+A database is just a directory.
 
 ```console
 $ iceql mydb -c "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INTEGER)"
@@ -26,7 +28,7 @@ id,name,age
 2,bob,\N
 ```
 
-作られたファイルはそのまま読める。
+The resulting files are readable as-is.
 
 ```console
 $ cat mydb/users.csv
@@ -50,7 +52,7 @@ columns:
 null_marker: \N
 ```
 
-引数なしで起動すると REPL になる。
+Running without arguments opens a REPL.
 
 ```console
 $ iceql mydb
@@ -63,13 +65,13 @@ users
 iceql> .quit
 ```
 
-`-f table|csv|json` で出力形式を選べる（既定は TTY なら table、パイプなら csv）。
-`iceql check mydb` はスキーマと CSV の整合性（型、NOT NULL、主キー重複、正規形）を検証し、問題があれば非ゼロで終了する。
-手編集した CSV の検証を CI や pre-commit に組み込める。
+`-f table|csv|json` selects the output format (defaults to table on a TTY, csv when piped).
+`iceql check mydb` validates schema/CSV consistency (types, NOT NULL, duplicate primary keys, canonical form) and exits non-zero on errors.
+This makes hand-edited CSV files verifiable in CI or a pre-commit hook.
 
 ## Python API
 
-sqlite3 モジュールと同じ感覚で使える DB-API 2.0 ライクな API を持つ。
+A DB-API 2.0 style API, familiar to anyone who has used the sqlite3 module.
 
 ```python
 import iceql
@@ -81,51 +83,51 @@ for row in conn.execute("SELECT name FROM users WHERE age > :min", {"min": 20}):
 conn.close()
 ```
 
-## 対応する SQL
+## Supported SQL
 
-- SELECT：WHERE、JOIN（INNER / LEFT）、GROUP BY、集約関数、HAVING、ORDER BY（NULLS FIRST / LAST 対応）、LIMIT / OFFSET、DISTINCT、IN サブクエリ、CTE（WITH）、UNION / UNION ALL
-- DML：INSERT（VALUES / SELECT）、UPDATE、DELETE
-- DDL：CREATE TABLE、DROP TABLE、ALTER TABLE（ADD / DROP / RENAME COLUMN、RENAME TO）
-- トランザクション：BEGIN / COMMIT / ROLLBACK（変更はメモリに溜まり、COMMIT で一括書き出し。DDL はトランザクション内では使えない）
-- プレースホルダ：`?`（qmark）と `:name`（named）
+- SELECT: WHERE, JOIN (INNER / LEFT), GROUP BY, aggregate functions, HAVING, ORDER BY (with NULLS FIRST / LAST), LIMIT / OFFSET, DISTINCT, IN subqueries, CTE (WITH), UNION / UNION ALL
+- DML: INSERT (VALUES / SELECT), UPDATE, DELETE
+- DDL: CREATE TABLE, DROP TABLE, ALTER TABLE (ADD / DROP / RENAME COLUMN, RENAME TO)
+- Transactions: BEGIN / COMMIT / ROLLBACK (changes are staged in memory and flushed on COMMIT; DDL is not allowed inside a transaction)
+- Placeholders: `?` (qmark) and `:name` (named)
 
-SQL のパースと SELECT の実行には [sqlglot](https://github.com/tobymao/sqlglot) を使っている。
-NULL の順序は SQLite と同じ既定（NULL 最小：ASC で先頭、DESC で末尾）に揃えている。
+SQL parsing and SELECT execution are powered by [sqlglot](https://github.com/tobymao/sqlglot).
+NULL ordering follows the SQLite default (NULL sorts smallest: first in ASC, last in DESC).
 
-## 型
+## Types
 
-| 型 | CSV 上の表現 |
+| Type | CSV representation |
 |---|---|
-| integer | 10 進整数 |
-| real | 浮動小数点数（最短表現） |
+| integer | decimal integer |
+| real | floating point (shortest round-trip form) |
 | boolean | `true` / `false` |
-| text | 文字列（`,` `"` 改行を含む場合のみクォート） |
+| text | string (quoted only when it contains `,` `"` or newlines) |
 | date | `YYYY-MM-DD` |
 | datetime | ISO-8601 |
 
-NULL は非クォートの `\N` で表す（PostgreSQL の COPY と同じ規約）。
-空文字列は空フィールドなので、NULL と空文字列を区別できる。
-文字列としての `\N` は `\\N` にエスケープされる。
+NULL is represented as an unquoted `\N` (the same convention as PostgreSQL COPY).
+An empty string is an empty field, so NULL and the empty string are distinguishable.
+A literal string `\N` is escaped as `\\N`.
 
-## MCP サーバー
+## MCP server
 
-LLM エージェントから DB を直接読み書きするための MCP サーバーを内蔵している。
+A built-in MCP server lets LLM agents read and write the database directly.
 
 ```console
 $ uv tool install 'iceql[mcp]'
-$ iceql mcp mydb --read-only   # --read-only を外すと書き込み系ツールも有効になる
+$ iceql mcp mydb --read-only   # drop --read-only to enable write tools
 ```
 
-ツールは query（SELECT のみ）、execute（DML / DDL）、list_tables、describe_table の 4 つ。
+Four tools are exposed: query (SELECT only), execute (DML / DDL), list_tables, and describe_table.
 
-## 制限事項
+## Limitations
 
-- ウィンドウ関数、集約内の DISTINCT（`COUNT(DISTINCT x)` など）、SELECT 句のスカラサブクエリは未対応（明確なエラーになる）
-- トランザクションは 1 接続内で完結し、複数接続の分離はない。COMMIT の複数テーブル書き出しはアトミックではない
-- テーブルは実行時に全件メモリに載る。想定スコープは「LLM がそのまま読めるサイズ」（数万行規模）のデータベースである
-- プロセス間ロックに fcntl を使うため、Windows は未対応
+- Window functions, DISTINCT inside aggregates (e.g. `COUNT(DISTINCT x)`), and scalar subqueries in the SELECT list are not supported (they fail with a clear error)
+- Transactions are per-connection with no isolation between connections; a COMMIT touching multiple tables is not atomic
+- Tables are fully loaded into memory at query time; the intended scope is databases small enough for an LLM to read directly (tens of thousands of rows)
+- Windows is not supported (inter-process locking uses fcntl)
 
-## 開発
+## Development
 
 ```console
 $ uv sync --all-groups
@@ -134,4 +136,4 @@ $ uv run ruff check src tests
 $ uv run mypy
 ```
 
-テストには、同一のクエリを iceql と sqlite3 の両方に投げて結果を突き合わせる差分テストを含む。
+The test suite includes differential tests that run the same queries against both iceql and sqlite3 and compare the results.
