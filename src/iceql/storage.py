@@ -7,6 +7,7 @@ CSV 正規形:
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import fcntl
 import os
@@ -104,6 +105,13 @@ def atomic_write(path: Path, content: str) -> None:
         raise OperationalError(f"cannot write {path}: {exc}") from exc
     finally:
         tmp.unlink(missing_ok=True)
+    # リネーム自体を永続化する(電源断対策)。対応しないファイルシステムでは諦める
+    with contextlib.suppress(OSError):
+        dirfd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dirfd)
+        finally:
+            os.close(dirfd)
 
 
 def write_rows(path: Path, rows: list[Row], schema: TableSchema) -> None:
@@ -213,3 +221,17 @@ class DatabaseLock:
         """COMMIT の書き出し用(write ロックは保持済みの前提)。"""
         with self._flush.locked(fcntl.LOCK_EX):
             yield
+
+    @contextmanager
+    def recovery(self) -> Iterator[None]:
+        """ジャーナル再適用用: write + flush の両方を排他で取る。"""
+        if self._tx is not None:
+            with self._flush.locked(fcntl.LOCK_EX):
+                yield
+        else:
+            handle = self._write.acquire(fcntl.LOCK_EX, self._timeout)
+            try:
+                with self._flush.locked(fcntl.LOCK_EX):
+                    yield
+            finally:
+                _FileLock.release(handle)

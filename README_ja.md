@@ -106,7 +106,8 @@ conn.close()
 - DDL：CREATE TABLE、DROP TABLE、ALTER TABLE（ADD / DROP / RENAME COLUMN、RENAME TO）
 - トランザクション：BEGIN / COMMIT / ROLLBACK（変更はメモリに溜まり、COMMIT で一括書き出し。DDL はトランザクション内では使えない）。
   書き手同士は直列化される。BEGIN は DB 全体の書き込みロックを COMMIT / ROLLBACK まで保持し、後発の書き手はその解放を待つ（`connect(timeout=...)` 秒を超えると `OperationalError`）。
-  SELECT は開いているトランザクションにブロックされず、COMMIT の書き出し中だけ瞬間的に待つ
+  SELECT は開いているトランザクションにブロックされず、COMMIT の書き出し中だけ瞬間的に待つ。
+  COMMIT はクラッシュ耐性を持つ。ステージ内容を先に redo ジャーナルへ書いてからテーブルを置換するため、途中でクラッシュしても次にデータベースを開いたときにコミットが自動で完成する
 - プレースホルダ：`?`（qmark）と `:name`（named）
 
 SQL のパースと SELECT の実行には [sqlglot](https://github.com/tobymao/sqlglot) を使っている。
@@ -141,7 +142,6 @@ $ iceql mcp mydb --read-only   # --read-only を外すと書き込み系ツー�
 ## 制限事項
 
 - ウィンドウ関数、集約内の DISTINCT（`COUNT(DISTINCT x)` など）、SELECT 句のスカラサブクエリは未対応（明確なエラーになる）
-- 複数テーブルを書き換える COMMIT の途中でクラッシュすると、一部のテーブルだけコミットされた状態が残りうる（各テーブルファイル単体の置換は常にアトミック）
 - テーブルは実行時に全件メモリに載る。想定スコープは「LLM がそのまま読めるサイズ」（数万行規模）のデータベースである
 - プロセス間ロックに fcntl を使うため、Windows は未対応
 

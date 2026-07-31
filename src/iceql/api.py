@@ -9,6 +9,7 @@ from typing import Any
 
 from sqlglot import exp
 
+from iceql import journal
 from iceql.catalog import init_database
 from iceql.engine import StatementResult, execute_statement, parse_statement
 from iceql.errors import InterfaceError, ProgrammingError
@@ -146,6 +147,7 @@ class Connection:
         self._lock = DatabaseLock(self._catalog.root, timeout=timeout)
         self._staged: StagedCatalog | None = None
         self._closed = False
+        journal.recover_if_needed(self._catalog, self._lock)
 
     def _check_open(self) -> None:
         if self._closed:
@@ -156,6 +158,8 @@ class Connection:
         return self._staged is not None
 
     def _execute_ast(self, ast: exp.Expression) -> StatementResult:
+        # 他プロセスのクラッシュで残ったコミットジャーナルがあれば先に再適用する
+        journal.recover_if_needed(self._catalog, self._lock)
         if isinstance(ast, exp.Transaction):
             self._begin()
             return StatementResult()

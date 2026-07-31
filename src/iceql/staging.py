@@ -46,8 +46,18 @@ class StagedCatalog(Catalog):
         raise NotSupportedError("DDL is not supported inside a transaction")
 
     def flush(self, lock: DatabaseLock) -> None:
-        """ステージ済みテーブルをディスクへ書き出す(COMMIT)。"""
-        with lock.flush_commit():
-            for table, (schema, rows) in self._staged.items():
-                self._base.write_rows(table, rows, schema)
+        """ステージ済みテーブルをディスクへ書き出す(COMMIT)。
+
+        先に全内容を redo ジャーナルとして原子的に置いてから各テーブルを
+        置換する。置換の途中でクラッシュしても、次の接続がジャーナルを
+        再適用してコミットを完成させる(journal.py 参照)。
+        """
+        from iceql import journal
+
+        if self._staged:
+            with lock.flush_commit():
+                journal.write_journal(self._base.root, self._staged)
+                for table, (schema, rows) in self._staged.items():
+                    self._base.write_rows(table, rows, schema)
+                journal.clear_journal(self._base.root)
         self._staged.clear()

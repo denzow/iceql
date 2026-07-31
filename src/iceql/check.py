@@ -44,6 +44,16 @@ def check_database(dbdir: str | Path) -> list[Issue]:
         return [Issue("error", "-", f"database directory does not exist: {root}")]
     catalog = Catalog(root)
 
+    if (root / ".iceql" / "journal").is_file():
+        issues.append(
+            Issue(
+                "warning",
+                "-",
+                "unapplied commit journal found (a COMMIT was interrupted); "
+                "it will be re-applied on the next connection",
+            )
+        )
+
     tables = catalog.list_tables()
     for table in tables:
         try:
