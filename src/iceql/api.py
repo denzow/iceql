@@ -141,9 +141,9 @@ class Cursor:
 
 
 class Connection:
-    def __init__(self, dbdir: str | Path) -> None:
+    def __init__(self, dbdir: str | Path, *, timeout: float = 5.0) -> None:
         self._catalog = init_database(dbdir)
-        self._lock = DatabaseLock(self._catalog.root)
+        self._lock = DatabaseLock(self._catalog.root, timeout=timeout)
         self._staged: StagedCatalog | None = None
         self._closed = False
 
@@ -175,6 +175,8 @@ class Connection:
     def _begin(self) -> None:
         if self.in_transaction:
             raise ProgrammingError("a transaction is already active")
+        # 他の書き手が COMMIT するまでここで待機する(timeout 超過で OperationalError)
+        self._lock.begin()
         self._staged = StagedCatalog(self._catalog)
 
     def cursor(self) -> Cursor:
@@ -191,17 +193,22 @@ class Connection:
         """トランザクション中ならステージ済みの変更を書き出す。それ以外は何もしない。"""
         self._check_open()
         if self._staged is not None:
-            self._staged.flush(self._lock)
-            self._staged = None
+            try:
+                self._staged.flush(self._lock)
+            finally:
+                self._staged = None
+                self._lock.end()
 
     def rollback(self) -> None:
         """トランザクション中ならステージ済みの変更を破棄する。それ以外は何もしない。"""
         self._check_open()
         self._staged = None
+        self._lock.end()
 
     def close(self) -> None:
         # 未コミットの変更は破棄される(ROLLBACK と同じ)
         self._staged = None
+        self._lock.end()
         self._closed = True
 
     def __enter__(self) -> Connection:
@@ -211,6 +218,10 @@ class Connection:
         self.close()
 
 
-def connect(dbdir: str | Path) -> Connection:
-    """DB ディレクトリに接続する。存在しなければ作成する(sqlite3 と同様)。"""
-    return Connection(dbdir)
+def connect(dbdir: str | Path, *, timeout: float = 5.0) -> Connection:
+    """DB ディレクトリに接続する。存在しなければ作成する(sqlite3 と同様)。
+
+    timeout は他の書き込みトランザクションのロック解放を待つ秒数
+    (sqlite3 の timeout 相当。超過すると OperationalError)。
+    """
+    return Connection(dbdir, timeout=timeout)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import fcntl
 import os
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -109,22 +110,18 @@ def write_rows(path: Path, rows: list[Row], schema: TableSchema) -> None:
     atomic_write(path, encode_rows(rows, schema))
 
 
-class DatabaseLock:
-    """DB ディレクトリ単位のプロセス間ロック(<dbdir>/.iceql/lock に flock)。
+class _FileLock:
+    """1 ファイルへの flock。Windows(fcntl 非対応)は現時点でスコープ外。"""
 
-    読み取りは共有ロック、書き込み文は排他ロックを取る。
-    Windows(fcntl 非対応)は現時点でスコープ外。
-    """
-
-    def __init__(self, dbdir: Path) -> None:
-        self._lock_path = dbdir / ".iceql" / "lock"
+    def __init__(self, path: Path) -> None:
+        self._path = path
 
     def _open(self) -> IO[bytes]:
-        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        return self._lock_path.open("ab")
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        return self._path.open("ab")
 
     @contextmanager
-    def _locked(self, flags: int) -> Iterator[None]:
+    def locked(self, flags: int) -> Iterator[None]:
         f = self._open()
         try:
             fcntl.flock(f.fileno(), flags)
@@ -133,12 +130,86 @@ class DatabaseLock:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
             f.close()
 
+    def acquire(self, flags: int, timeout: float) -> IO[bytes]:
+        """fd を保持したままロックを取得する(トランザクション用)。"""
+        f = self._open()
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(f.fileno(), flags | fcntl.LOCK_NB)
+                return f
+            except OSError:
+                if time.monotonic() >= deadline:
+                    f.close()
+                    raise OperationalError(
+                        "database is locked (another write transaction is active)"
+                    ) from None
+                time.sleep(0.01)
+
+    @staticmethod
+    def release(f: IO[bytes]) -> None:
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        f.close()
+
+
+class DatabaseLock:
+    """DB ディレクトリ単位の 2 段ロック。
+
+    - write ロック(<dbdir>/.iceql/lock.write): 書き手同士の直列化。
+      autocommit の書き込み文は文の間、トランザクションは BEGIN〜COMMIT で保持する。
+    - flush ロック(<dbdir>/.iceql/lock.flush): ディスク I/O の整合。
+      SELECT のロードは共有、書き出しは排他で取り、複数テーブルの置換途中を読ませない。
+
+    取得順は常に write → flush(逆順を作らないことでデッドロックを防ぐ)。
+    これにより、トランザクションが長く開いていても SELECT は COMMIT の
+    書き出し中(ミリ秒)しか待たない。
+    """
+
+    def __init__(self, dbdir: Path, timeout: float = 5.0) -> None:
+        base = dbdir / ".iceql"
+        self._write = _FileLock(base / "lock.write")
+        self._flush = _FileLock(base / "lock.flush")
+        self._timeout = timeout
+        self._tx: IO[bytes] | None = None
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._tx is not None
+
+    def begin(self) -> None:
+        """write ロックを取得し、COMMIT / ROLLBACK まで保持する。"""
+        assert self._tx is None
+        self._tx = self._write.acquire(fcntl.LOCK_EX, self._timeout)
+
+    def end(self) -> None:
+        if self._tx is not None:
+            _FileLock.release(self._tx)
+            self._tx = None
+
     @contextmanager
-    def shared(self) -> Iterator[None]:
-        with self._locked(fcntl.LOCK_SH):
+    def read(self) -> Iterator[None]:
+        """SELECT 用: フラッシュ中でなければ待たない。"""
+        with self._flush.locked(fcntl.LOCK_SH):
             yield
 
     @contextmanager
-    def exclusive(self) -> Iterator[None]:
-        with self._locked(fcntl.LOCK_EX):
+    def write_statement(self) -> Iterator[None]:
+        """書き込み文用。トランザクション外なら write + flush 排他、
+        トランザクション中は write 保持済みで書き込み先はメモリなので
+        ディスク読みの整合(flush 共有)だけ守る。"""
+        if self._tx is not None:
+            with self._flush.locked(fcntl.LOCK_SH):
+                yield
+        else:
+            handle = self._write.acquire(fcntl.LOCK_EX, self._timeout)
+            try:
+                with self._flush.locked(fcntl.LOCK_EX):
+                    yield
+            finally:
+                _FileLock.release(handle)
+
+    @contextmanager
+    def flush_commit(self) -> Iterator[None]:
+        """COMMIT の書き出し用(write ロックは保持済みの前提)。"""
+        with self._flush.locked(fcntl.LOCK_EX):
             yield

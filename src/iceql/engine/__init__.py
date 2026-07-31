@@ -48,25 +48,25 @@ def execute_statement(
     from iceql.engine import ddl, dml, executor
 
     if isinstance(ast, (exp.Select, exp.Union, exp.Except, exp.Intersect)):
-        with lock.shared():
+        with lock.read():
             return executor.run_select(catalog, ast)
     if isinstance(ast, exp.Insert):
-        with lock.exclusive():
+        with lock.write_statement():
             return dml.run_insert(catalog, ast)
     if isinstance(ast, exp.Update):
-        with lock.exclusive():
+        with lock.write_statement():
             return dml.run_update(catalog, ast)
     if isinstance(ast, exp.Delete):
-        with lock.exclusive():
+        with lock.write_statement():
             return dml.run_delete(catalog, ast)
     if isinstance(ast, exp.Create):
-        with lock.exclusive():
+        with lock.write_statement():
             return ddl.run_create(catalog, ast)
     if isinstance(ast, exp.Drop):
-        with lock.exclusive():
+        with lock.write_statement():
             return ddl.run_drop(catalog, ast)
     if isinstance(ast, exp.Alter):
-        with lock.exclusive():
+        with lock.write_statement():
             return ddl.run_alter(catalog, ast)
     if isinstance(ast, (exp.Transaction, exp.Commit, exp.Rollback)):
         raise NotSupportedError("transactions are not supported yet")

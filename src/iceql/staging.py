@@ -47,7 +47,7 @@ class StagedCatalog(Catalog):
 
     def flush(self, lock: DatabaseLock) -> None:
         """ステージ済みテーブルをディスクへ書き出す(COMMIT)。"""
-        with lock.exclusive():
+        with lock.flush_commit():
             for table, (schema, rows) in self._staged.items():
                 self._base.write_rows(table, rows, schema)
         self._staged.clear()

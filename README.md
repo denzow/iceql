@@ -104,7 +104,7 @@ conn.close()
 - SELECT: WHERE, JOIN (INNER / LEFT), GROUP BY, aggregate functions, HAVING, ORDER BY (with NULLS FIRST / LAST), LIMIT / OFFSET, DISTINCT, IN subqueries, CTE (WITH), UNION / UNION ALL
 - DML: INSERT (VALUES / SELECT), UPDATE, DELETE
 - DDL: CREATE TABLE, DROP TABLE, ALTER TABLE (ADD / DROP / RENAME COLUMN, RENAME TO)
-- Transactions: BEGIN / COMMIT / ROLLBACK (changes are staged in memory and flushed on COMMIT; DDL is not allowed inside a transaction)
+- Transactions: BEGIN / COMMIT / ROLLBACK (changes are staged in memory and flushed on COMMIT; DDL is not allowed inside a transaction). Writers are serialized: BEGIN takes a database-wide write lock held until COMMIT / ROLLBACK, and other writers wait for it (up to `connect(timeout=...)` seconds, then `OperationalError`). SELECTs are never blocked by an open transaction — they only wait during the brief COMMIT flush
 - Placeholders: `?` (qmark) and `:name` (named)
 
 SQL parsing and SELECT execution are powered by [sqlglot](https://github.com/tobymao/sqlglot).
@@ -139,7 +139,7 @@ Four tools are exposed: query (SELECT only), execute (DML / DDL), list_tables, a
 ## Limitations
 
 - Window functions, DISTINCT inside aggregates (e.g. `COUNT(DISTINCT x)`), and scalar subqueries in the SELECT list are not supported (they fail with a clear error)
-- Transactions are per-connection with no isolation between connections; a COMMIT touching multiple tables is not atomic
+- A crash in the middle of a COMMIT that touches multiple tables can leave some tables committed and others not (each table file itself is always replaced atomically)
 - Tables are fully loaded into memory at query time; the intended scope is databases small enough for an LLM to read directly (tens of thousands of rows)
 - Windows is not supported (inter-process locking uses fcntl)
 
