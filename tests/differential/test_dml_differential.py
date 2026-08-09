@@ -45,6 +45,25 @@ DML_CASES = [
         "DELETE FROM t WHERE id = 4",
         "INSERT INTO t (name) VALUES ('e')",
     ],
+    # UPDATE / DELETE の高速パス(WHERE が「列 = 定数」の AND だけの形)
+    ["UPDATE t SET score = 9.5 WHERE id = 2"],
+    ["UPDATE t SET tag = 'z' WHERE tag = 'x'"],
+    ["UPDATE t SET tag = 'z' WHERE tag = 'x' AND id = 4"],
+    ["UPDATE t SET score = NULL WHERE score = 1.5"],
+    ["UPDATE t SET tag = 'z' WHERE score = 2"],
+    ["UPDATE t SET tag = 'z' WHERE tag = NULL"],
+    ["UPDATE t SET tag = name WHERE id = 3"],
+    ["UPDATE t SET name = tag, tag = name WHERE id = 1"],
+    ["UPDATE t SET tag = 'z'"],
+    ["DELETE FROM t WHERE id = 3"],
+    ["DELETE FROM t WHERE tag = 'x'"],
+    ["DELETE FROM t WHERE tag = NULL"],
+    ["DELETE FROM t WHERE score = -0.5"],
+    [
+        "UPDATE t SET tag = 'z' WHERE id = 1",
+        "DELETE FROM t WHERE tag = 'z'",
+        "UPDATE t SET score = 0.0 WHERE tag = 'y'",
+    ],
 ]
 
 

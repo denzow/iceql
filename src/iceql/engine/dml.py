@@ -9,6 +9,24 @@ INSERT の競合解決(OR IGNORE / OR REPLACE / ON CONFLICT)も同じ考え方�
 DO UPDATE の SET 式は対象行と excluded 行を 1 行ずつのテーブルにして
 SELECT で評価する。RETURNING も同様に、返す行だけを載せたテーブルへの
 SELECT に還元する(_Returning 参照)。
+
+還元は式のセマンティクスを sqlglot に任せられる代わりに、1 文ごとに
+テーブル全行を executor に通す。UPDATE / DELETE のうち、式を Python 側で
+評価しても結果が変わらないと分かる形だけは、還元を経ない高速パスで処理する
+(_equality_terms / _row_setters)。受理する範囲は次のとおり:
+
+- WHERE が省略されているか、``列 = 定数`` の AND だけで書かれている。
+  列は対象テーブルの列で、修飾は無しかテーブル名のみ。定数はリテラル
+  (数値・文字列・真偽値・符号付き数値)に限り、``= NULL`` は還元へ回す。
+  比較は Python の ``==`` で行う。sqlglot の executor も EQ を Python の
+  ``==`` で評価し、どちらかが NULL なら UNKNOWN として行を落とすので、
+  値が NULL の行が選ばれない点も含めて結果が一致する。
+- UPDATE の SET の右辺がすべて定数か、対象テーブルの列参照そのもの。
+  列参照は更新前の行から読む(還元でも右辺は更新前の行に対して評価される)。
+
+これ以外(関数呼び出し、算術、CASE、サブクエリ、OR、比較演算子など)は
+1 つでも混ざれば還元へ回す。高速パスと還元は同じ結果になることを
+tests/test_dml_fast_path.py が両経路の突き合わせで固定している。
 """
 
 from __future__ import annotations
@@ -17,13 +35,14 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import islice
 from operator import itemgetter
+from typing import cast
 
 from sqlglot import exp
 from sqlglot.executor.table import Table
 
 from iceql.catalog import Catalog
 from iceql.engine import StatementResult, executor, node_arg
-from iceql.errors import IntegrityError, NotSupportedError, ProgrammingError
+from iceql.errors import DataError, IntegrityError, NotSupportedError, ProgrammingError
 from iceql.schema import TableSchema
 from iceql.storage import Row
 from iceql.tablecache import sqlglot_table
@@ -658,6 +677,153 @@ def run_insert(catalog: Catalog, ast: exp.Insert) -> StatementResult:
     return result
 
 
+def _unparen(node: exp.Expression) -> exp.Expression:
+    while isinstance(node, exp.Paren):
+        node = node.this
+    return node
+
+
+def _own_column(schema: TableSchema, table: str, node: exp.Expression) -> int | None:
+    """対象テーブルの列そのものを指す参照ならその位置を、違えば None を返す。"""
+    node = _unparen(node)
+    if not isinstance(node, exp.Column) or not isinstance(node.this, exp.Identifier):
+        return None
+    if node.args.get("db") or node.args.get("catalog") or node.table not in ("", table):
+        return None
+    try:
+        return schema.column_index(node.name)
+    except DataError:
+        # 存在しない列は還元へ回す(エラーの文言を 1 か所に保つ)
+        return None
+
+
+def _equality_terms(
+    schema: TableSchema, table: str, where: exp.Expression | None
+) -> list[tuple[int, Value]] | None:
+    """WHERE が「列 = 定数」の AND だけなら (列位置, 値) の並びを返す。
+
+    高速パスに乗らない形は None を返す。WHERE が無い場合は空の並び
+    (全行が対象)になる。詳しい受理範囲はモジュールの docstring を参照。
+    """
+    if where is None:
+        return []
+    terms: list[tuple[int, Value]] = []
+    pending = [where]
+    while pending:
+        node = _unparen(pending.pop())
+        if isinstance(node, exp.And):
+            pending.append(node.this)
+            pending.append(node.expression)
+            continue
+        if not isinstance(node, exp.EQ):
+            return None
+        index = _own_column(schema, table, node.this)
+        constant = node.expression
+        if index is None:
+            index = _own_column(schema, table, node.expression)
+            constant = node.this
+            if index is None:
+                return None
+        constant = _unparen(constant)
+        # ``列 = NULL`` は常に UNKNOWN。_eval_constant は NULL を None として
+        # 返すため、素通しすると「値が NULL の行に一致する」になってしまう
+        if isinstance(constant, exp.Null):
+            return None
+        try:
+            value = _eval_constant(constant)
+        except (NotSupportedError, ProgrammingError):
+            return None
+        terms.append((index, value))
+    return terms
+
+
+def _matching_positions(rows: list[Row], terms: list[tuple[int, Value]]) -> list[int]:
+    """等値条件をすべて満たす行の位置。条件が空なら全行。
+
+    値が NULL の行は Python の ``==`` が False を返すので自然に外れる
+    (定数側が NULL の形は _equality_terms が受け付けない)。
+    """
+    if not terms:
+        return list(range(len(rows)))
+    if len(terms) == 1:
+        index, value = terms[0]
+        return [i for i, row in enumerate(rows) if row[index] == value]
+    return [i for i, row in enumerate(rows) if all(row[k] == v for k, v in terms)]
+
+
+def _from_column(index: int) -> Callable[[Row], Value]:
+    return lambda row: row[index]
+
+
+def _from_constant(value: Value) -> Callable[[Row], Value]:
+    return lambda _row: value
+
+
+def _row_setters(
+    schema: TableSchema, table: str, set_items: list[tuple[str, exp.Expression]]
+) -> list[Callable[[Row], Value]] | None:
+    """SET の右辺がすべて定数か対象テーブルの列参照なら、値を取り出す関数を返す。
+
+    どれか 1 つでも他の形なら None を返し、SELECT への還元に任せる。
+    """
+    getters: list[Callable[[Row], Value]] = []
+    for _, node in set_items:
+        index = _own_column(schema, table, node)
+        if index is not None:
+            getters.append(_from_column(index))
+            continue
+        try:
+            getters.append(_from_constant(_eval_constant(node)))
+        except (NotSupportedError, ProgrammingError):
+            return None
+    return getters
+
+
+def _touches_unique_key(schema: TableSchema, columns: Iterable[str]) -> bool:
+    """更新する列が主キーか UNIQUE 制約に含まれるか。
+
+    含まれないなら一意キーの値はどの行でも変わらないので、重複が新しく
+    生まれることはない。CHECK を変更行だけで検査しているのと同じ考え方で、
+    元から重複している(手で壊された)CSV の検出は狙わない。
+    """
+    changed = set(columns)
+    if changed.intersection(schema.primary_key):
+        return True
+    return any(changed.intersection(c.columns) for c in schema.unique)
+
+
+def _reduce_update(
+    catalog: Catalog,
+    table: str,
+    schema: TableSchema,
+    rows: list[Row],
+    set_items: list[tuple[str, exp.Expression]],
+    set_indexes: list[int],
+    condition: exp.Expression | None,
+) -> list[int]:
+    """SELECT _rowid_, <e1> AS __set_0, ... FROM t WHERE c に還元して更新する。"""
+    set_projections = [
+        exp.alias_(value_expr.copy(), f"__set_{i}")
+        for i, (_, value_expr) in enumerate(set_items)
+    ]
+    select = exp.select(ROWID, *set_projections).from_(table)
+    if condition is not None:
+        select = select.where(condition.copy())
+    tables, annotations = _rowid_tables(catalog, select, table, schema, rows)
+    _, matched = executor.evaluate(select, tables, annotations)
+
+    changed: list[int] = []
+    for row in matched:
+        rowid = row[0]
+        assert isinstance(rowid, int)
+        updated = list(rows[rowid])
+        for index, value in zip(set_indexes, row[1:], strict=True):
+            updated[index] = value
+        rows[rowid] = schema.validate_values(updated)
+        changed.append(rowid)
+    return changed
+
+
 def run_update(catalog: Catalog, ast: exp.Update) -> StatementResult:
     # FROM 句のキーは sqlglot のバージョンで from / from_ のどちらかになる
     if node_arg(ast, "from", "from_"):
@@ -675,35 +841,35 @@ def run_update(catalog: Catalog, ast: exp.Update) -> StatementResult:
         schema.column(column)  # 存在チェック
         set_items.append((column, item.expression))
 
-    # SELECT _rowid_, <e1> AS __set_0, ... FROM t WHERE c に還元して評価する
-    set_projections = [
-        exp.alias_(value_expr.copy(), f"__set_{i}")
-        for i, (_, value_expr) in enumerate(set_items)
-    ]
-    select = exp.select(ROWID, *set_projections).from_(table)
     where = node_arg(ast, "where")
-    if where:
-        select = select.where(where.this.copy())
-    tables, annotations = _rowid_tables(catalog, select, table, schema, rows)
-    _, matched = executor.evaluate(select, tables, annotations)
-
+    condition = where.this if where else None
     set_indexes = [schema.column_index(column) for column, _ in set_items]
-    changed: list[int] = []
-    for row in matched:
-        rowid = row[0]
-        assert isinstance(rowid, int)
-        updated = list(rows[rowid])
-        for index, value in zip(set_indexes, row[1:], strict=True):
-            updated[index] = value
-        rows[rowid] = schema.validate_values(updated)
-        changed.append(rowid)
-        if returning is not None:
+
+    terms = _equality_terms(schema, table, condition)
+    getters = None if terms is None else _row_setters(schema, table, set_items)
+    if terms is not None and getters is not None:
+        changed = _matching_positions(rows, terms)
+        for position in changed:
+            source = rows[position]
+            updated = list(source)
+            # 右辺はどれも更新前の行から読む(SET a = b, b = a が入れ替えになる)
+            for index, get in zip(set_indexes, getters, strict=True):
+                updated[index] = get(source)
+            rows[position] = schema.validate_values(updated)
+    else:
+        changed = _reduce_update(
+            catalog, table, schema, rows, set_items, set_indexes, condition
+        )
+
+    if returning is not None:
+        for position in changed:
             # sqlite と同じく、RETURNING が返すのは更新後の値
-            returning.add(rows[rowid])
-    _check_primary_key(schema, rows)
-    check_unique(schema, rows)
+            returning.add(rows[position])
+    if _touches_unique_key(schema, (column for column, _ in set_items)):
+        _check_primary_key(schema, rows)
+        check_unique(schema, rows)
     check_expressions(schema, rows, changed)
-    result = _result(returning, len(matched))
+    result = _result(returning, len(changed))
     catalog.write_rows(table, rows, schema)
     return result
 
@@ -714,21 +880,34 @@ def run_delete(catalog: Catalog, ast: exp.Delete) -> StatementResult:
     returning = _returning(ast, schema)
     rows = catalog.read_rows(table)
 
-    select = exp.select(ROWID).from_(table)
     where = node_arg(ast, "where")
-    if where:
-        select = select.where(where.this.copy())
-    tables, annotations = _rowid_tables(catalog, select, table, schema, rows)
-    _, matched = executor.evaluate(select, tables, annotations)
+    condition = where.this if where else None
 
-    doomed = {row[0] for row in matched}
-    remaining: list[Row] = []
-    for i, row in enumerate(rows):
-        if i not in doomed:
-            remaining.append(row)
-        elif returning is not None:
+    doomed: set[Value]
+    terms = _equality_terms(schema, table, condition)
+    if terms is not None:
+        doomed = set(_matching_positions(rows, terms))
+    else:
+        select = exp.select(ROWID).from_(table)
+        if condition is not None:
+            select = select.where(condition.copy())
+        tables, annotations = _rowid_tables(catalog, select, table, schema, rows)
+        _, matched = executor.evaluate(select, tables, annotations)
+        doomed = {row[0] for row in matched}
+
+    positions = sorted(cast("int", position) for position in doomed)
+    if returning is not None:
+        for position in positions:
             # 消える行なので、返すのは削除前の値になる
-            returning.add(row)
-    result = _result(returning, len(doomed))
+            returning.add(rows[position])
+    # 残す区間をスライスで繋ぐ。Python 側の反復が削除行数で済むので、
+    # 数行だけ消す文がテーブル全行の走査にならない
+    remaining: list[Row] = []
+    start = 0
+    for position in positions:
+        remaining += rows[start:position]
+        start = position + 1
+    remaining += rows[start:]
+    result = _result(returning, len(positions))
     catalog.write_rows(table, remaining, schema)
     return result
