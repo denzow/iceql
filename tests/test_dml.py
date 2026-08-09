@@ -51,6 +51,66 @@ class TestInsert:
             "INSERT INTO depts (id, dept) VALUES (?, ?)", [(5, "a"), (6, "b")]
         )
         assert cur.rowcount == 2
+        assert all_rows(conn, "depts")[-2:] == [(5, "a"), (6, "b")]
+
+    def test_executemany_named_params(self, conn):
+        conn.executemany(
+            "INSERT INTO depts (id, dept) VALUES (:id, :dept)",
+            [{"id": 5, "dept": "a"}, {"id": 6, "dept": "b"}],
+        )
+        assert all_rows(conn, "depts")[-2:] == [(5, "a"), (6, "b")]
+
+    def test_executemany_multi_row_template(self, conn):
+        cur = conn.executemany(
+            "INSERT INTO depts (id, dept) VALUES (?, ?), (?, ?)",
+            [(5, "a", 6, "b"), (7, "c", 8, "d")],
+        )
+        assert cur.rowcount == 4
+        assert len(all_rows(conn, "depts")) == 6
+
+    def test_executemany_writes_the_table_once(self, conn, monkeypatch):
+        from iceql import storage
+
+        original = storage.write_rows
+        writes = []
+
+        def counting_write_rows(path, rows, schema):
+            writes.append(path)
+            original(path, rows, schema)
+
+        monkeypatch.setattr(storage, "write_rows", counting_write_rows)
+        conn.executemany(
+            "INSERT INTO depts (id, dept) VALUES (?, ?)",
+            [(i, str(i)) for i in range(5, 15)],
+        )
+        assert len(writes) == 1
+
+    def test_executemany_is_all_or_nothing(self, conn):
+        with pytest.raises(IntegrityError):
+            conn.executemany(
+                "INSERT INTO depts (id, dept) VALUES (?, ?)", [(5, "a"), (1, "dup")]
+            )
+        assert all_rows(conn, "depts") == [(1, "eng"), (2, "sales")]
+
+    def test_executemany_without_params(self, conn):
+        cur = conn.executemany("INSERT INTO depts (id, dept) VALUES (?, ?)", [])
+        assert cur.rowcount == 0
+        assert len(all_rows(conn, "depts")) == 2
+
+    def test_executemany_update(self, conn):
+        cur = conn.executemany(
+            "UPDATE depts SET dept = ? WHERE id = ?", [("a", 1), ("b", 2)]
+        )
+        assert cur.rowcount == 2
+        assert all_rows(conn, "depts") == [(1, "a"), (2, "b")]
+
+    def test_executemany_insert_select(self, conn):
+        cur = conn.executemany(
+            "INSERT INTO depts (id, dept) SELECT id + ?, name FROM users WHERE id = 1",
+            [(100,), (200,)],
+        )
+        assert cur.rowcount == 2
+        assert all_rows(conn, "depts")[-2:] == [(101, "alice"), (201, "alice")]
 
     def test_insert_select(self, conn):
         cur = conn.execute(
@@ -129,6 +189,11 @@ class TestAutoIncrement:
     def test_explicit_value_advances_within_one_statement(self, conn):
         conn.execute("INSERT INTO depts VALUES (5, 'a'), (NULL, 'b')")
         assert all_rows(conn, "depts")[-1] == (6, "b")
+
+    def test_executemany_assigns_successive_values(self, conn):
+        cur = conn.executemany("INSERT INTO depts (dept) VALUES (?)", [("hr",), ("legal",)])
+        assert all_rows(conn, "depts")[-2:] == [(3, "hr"), (4, "legal")]
+        assert cur.lastrowid == 4
 
     def test_reuses_deleted_values(self, conn):
         conn.execute("INSERT INTO depts (dept) VALUES ('hr')")

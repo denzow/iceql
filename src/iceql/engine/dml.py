@@ -8,6 +8,9 @@ SELECT と完全に一致し、式評価器を自前で持たずに済む。
 
 from __future__ import annotations
 
+from itertools import islice
+from operator import itemgetter
+
 from sqlglot import exp
 from sqlglot.executor.table import Table
 
@@ -44,13 +47,20 @@ def _eval_constant(node: exp.Expression) -> Value:
     )
 
 
-def _check_primary_key(schema: TableSchema, rows: list[Row]) -> None:
+def _check_primary_key(schema: TableSchema, rows: list[Row], checked: int = 0) -> None:
+    """主キーの重複を検査する。
+
+    先頭 ``checked`` 行は検査済みとして扱い、キー集合を作るためだけに走査する。
+    INSERT のように末尾へ足すだけの操作では、重複判定が新しい行だけで済む。
+    """
     indexes = [schema.column_index(c) for c in schema.primary_key]
     if not indexes:
         return
-    seen: set[tuple[Value, ...]] = set()
-    for row in rows:
-        key = tuple(row[i] for i in indexes)
+    # 単一列なら値そのものを鍵にする(行ごとの tuple 生成を避ける)
+    key_of = itemgetter(*indexes)
+    seen = set(map(key_of, islice(rows, checked)))
+    for row in islice(rows, checked, None):
+        key = key_of(row)
         if key in seen:
             raise IntegrityError(
                 f"UNIQUE constraint failed: {schema.table} primary key {key!r}"
@@ -126,6 +136,7 @@ def run_insert(catalog: Catalog, ast: exp.Insert) -> StatementResult:
         raise NotSupportedError(f"unsupported INSERT source: {type(source).__name__}")
 
     rows = catalog.read_rows(table)
+    existing = len(rows)
     auto = schema.autoincrement_column
     auto_index = schema.column_index(auto.name) if auto is not None else None
     next_id = 0 if auto_index is None else _next_autoincrement(rows, auto_index)
@@ -148,7 +159,7 @@ def run_insert(catalog: Catalog, ast: exp.Insert) -> StatementResult:
             next_id = max(next_id, assigned + 1)
             last_id = assigned
         rows.append(validated)
-    _check_primary_key(schema, rows)
+    _check_primary_key(schema, rows, existing)
     catalog.write_rows(table, rows, schema)
     return StatementResult(rowcount=len(new_values), lastrowid=last_id)
 

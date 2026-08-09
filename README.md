@@ -125,6 +125,15 @@ for row in conn.execute("SELECT name FROM users WHERE age > :min", {"min": 20}):
 conn.close()
 ```
 
+Every write rewrites the whole CSV, so running one INSERT per row costs time proportional to the square of the row count.
+`executemany` builds all the rows in memory and writes the file once.
+
+```python
+conn.executemany("INSERT INTO users VALUES (?, ?, ?)", rows)
+```
+
+For anything `executemany` does not cover (mixed statements, UPDATE against many keys), wrap the statements in a transaction: they are staged in memory and written once at COMMIT.
+
 ## Supported SQL
 
 - SELECT: WHERE, JOIN (INNER / LEFT), GROUP BY, aggregate functions, HAVING, ORDER BY (with NULLS FIRST / LAST), LIMIT / OFFSET, DISTINCT, IN subqueries, CTE (WITH), UNION / UNION ALL

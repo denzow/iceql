@@ -134,6 +134,16 @@ for row in conn.execute("SELECT name FROM users WHERE age > :min", {"min": 20}):
 conn.close()
 ```
 
+書き込みは毎回 CSV 全体を書き直すため、1 行につき 1 文の INSERT を実行すると総コストが行数の二乗になる。
+`executemany` は全パラメータ分の行をメモリ上で組み立ててから 1 回だけ書き出す。
+
+```python
+conn.executemany("INSERT INTO users VALUES (?, ?, ?)", rows)
+```
+
+`executemany` で書けない場合（種類の違う文が混ざる、多数のキーに対する UPDATE など）は、トランザクションで囲む。
+変更はメモリに溜まり、COMMIT で 1 回だけ書き出される。
+
 ## 対応する SQL
 
 - SELECT：WHERE、JOIN（INNER / LEFT）、GROUP BY、集約関数、HAVING、ORDER BY（NULLS FIRST / LAST 対応）、LIMIT / OFFSET、DISTINCT、IN サブクエリ、CTE（WITH）、UNION / UNION ALL

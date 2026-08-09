@@ -61,6 +61,25 @@ def bind_parameters(ast: exp.Expression, params: Params | None) -> None:
         ph.replace(_to_literal(value))
 
 
+def _batch_insert(ast: exp.Expression, seq_of_params: Sequence[Params]) -> exp.Insert | None:
+    """INSERT ... VALUES を、全パラメータ分の行を持つ 1 文にまとめる。
+
+    1 行ずつ実行すると、文ごとにテーブル全件の読み書きが起きるため、
+    総コストが行数の二乗になる。まとめて 1 文にすれば書き出しは 1 回で済む。
+    まとめられない文(INSERT 以外、INSERT ... SELECT)には None を返す。
+    """
+    if not isinstance(ast, exp.Insert) or not isinstance(ast.expression, exp.Values):
+        return None
+    tuples: list[exp.Expression] = []
+    for params in seq_of_params:
+        bound = ast.copy()
+        bind_parameters(bound, params)
+        tuples.extend(bound.expression.expressions)
+    batched = ast.copy()
+    batched.expression.set("expressions", tuples)
+    return batched
+
+
 class Cursor:
     arraysize = 1
 
@@ -90,6 +109,16 @@ class Cursor:
 
     def executemany(self, sql: str, seq_of_params: Sequence[Params]) -> Cursor:
         self._check_open()
+        seq_of_params = list(seq_of_params)
+        ast = parse_statement(sql)
+        if not seq_of_params:
+            self._apply(StatementResult(rowcount=0))
+            return self
+        batched = _batch_insert(ast, seq_of_params)
+        if batched is not None:
+            # 全行を 1 文にまとめたので、失敗したときは 1 行も入らない
+            self._apply(self.connection._execute_ast(batched))
+            return self
         total = 0
         for params in seq_of_params:
             self.execute(sql, params)
