@@ -23,7 +23,8 @@ sqlglot の optimizer が扱えないサブクエリは rewrite_subqueries で�
 
 sqlglot.executor は SQL 式を Python 式に落として評価する。IN と NOT は Python の
 集合の帰属判定と ``not`` にそのまま落ちて NULL を伝播しないので、三値論理どおりに
-評価する関数へ差し替える(_sql_in / _sql_not)。
+評価する関数へ差し替える(_sql_in / _sql_not)。NOT LIKE は Like ノードの negate
+フラグが Python 式に現れず否定ごと消えるので、生成側で NOT() に包み直す。
 
 テーブルは sqlglot.executor.table.Table として組み立てて渡す。行を dict の
 リストで渡すと、sqlglot が行ごと・列ごとに列名を正規化し直して別表現へ複製し、
@@ -117,6 +118,22 @@ def _in_py(generator: Generator, node: exp.In) -> str:
 
 PythonGenerator.TRANSFORMS[exp.In] = _in_py
 PythonGenerator.TRANSFORMS[exp.Not] = lambda generator, node: f"NOT({generator.sql(node.this)})"
+
+# sqlglot は ``x NOT LIKE y`` を Not(Like(...)) ではなく Like(negate=True) にパース
+# する。Python 式への変換は引数を並べて関数呼び出しにするだけで negate を落とすため、
+# そのままだと ``LIKE(x, y)`` になって否定が消える。negate が立っていれば NOT() で
+# 包み直す。ILIKE も同じ形なので同じ差し替えを当てる(ILIKE の評価そのものは
+# sqlglot の実行環境に関数が無く、否定の有無によらず未対応のまま)。
+_LIKE_AS_CALL = PythonGenerator.TRANSFORMS[exp.Like]
+
+
+def _like_py(generator: Generator, node: exp.Like | exp.ILike) -> str:
+    call = _LIKE_AS_CALL(generator, node)
+    return f"NOT({call})" if node_arg(node, "negate") else call
+
+
+PythonGenerator.TRANSFORMS[exp.Like] = _like_py
+PythonGenerator.TRANSFORMS[exp.ILike] = _like_py
 
 # executor に渡すスキーマ注釈。date/datetime は ISO 文字列のまま比較するので text
 _SQLGLOT_TYPES = {

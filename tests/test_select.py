@@ -340,6 +340,46 @@ class TestLiteralInThreeValuedLogic:
         assert rows == [(2,), (4,)]
 
 
+class TestNotLike:
+    """NOT LIKE。sqlglot は Like ノードの negate フラグとして持つ。"""
+
+    def test_not_like_filters(self, conn):
+        rows = q(conn, "SELECT id FROM users WHERE name NOT LIKE 'a%' ORDER BY id")
+        assert rows == [(2,), (3,), (4,)]
+
+    def test_not_like_projects_negated_value(self, conn):
+        rows = q(conn, "SELECT id, name NOT LIKE 'a%' FROM users ORDER BY id")
+        assert rows == [(1, False), (2, True), (3, True), (4, True)]
+
+    def test_not_like_propagates_null(self, conn):
+        # joined が NULL の carol は NOT LIKE が NULL になるので WHERE を通らない
+        rows = q(conn, "SELECT id FROM users WHERE joined NOT LIKE '2020%' ORDER BY id")
+        assert rows == [(2,), (4,)]
+
+    def test_not_like_projects_null(self, conn):
+        rows = q(conn, "SELECT id, joined NOT LIKE '2020%' FROM users ORDER BY id")
+        assert rows == [(1, False), (2, True), (3, None), (4, True)]
+
+    def test_parenthesized_not_like(self, conn):
+        rows = q(conn, "SELECT id FROM users WHERE NOT (name NOT LIKE 'a%') ORDER BY id")
+        assert rows == [(1,)]
+
+    def test_not_like_under_or(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM users WHERE name NOT LIKE 'a%' OR name LIKE 'a%' ORDER BY id",
+        )
+        assert rows == [(1,), (2,), (3,), (4,)]
+
+    def test_not_like_inside_case(self, conn):
+        rows = q(
+            conn,
+            "SELECT id, CASE WHEN name NOT LIKE 'a%' THEN 'y' ELSE 'n' END FROM users "
+            "ORDER BY id",
+        )
+        assert rows == [(1, "n"), (2, "y"), (3, "y"), (4, "y")]
+
+
 class TestOrderByNulls:
     def test_asc_nulls_first(self, conn):
         # SQLite と同じ既定: ASC は NULL が先頭

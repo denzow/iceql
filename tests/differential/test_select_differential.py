@@ -130,6 +130,14 @@ SELECT_QUERIES = [
     "SELECT dept_id, COUNT(*) FROM users WHERE dept_id NOT IN (2) GROUP BY dept_id",
     "SELECT id FROM users WHERE NOT (joined LIKE '2020%') ORDER BY id",
     "SELECT id, NOT (joined LIKE '2020%') FROM users ORDER BY id",
+    # NOT LIKE(sqlglot は Like ノードの negate フラグとして持つ)
+    "SELECT id FROM users WHERE name NOT LIKE 'a%' ORDER BY id",
+    "SELECT id FROM users WHERE joined NOT LIKE '2020%' ORDER BY id",
+    "SELECT id, name NOT LIKE 'a%', joined NOT LIKE '2020%' FROM users ORDER BY id",
+    "SELECT id FROM users WHERE NOT (name NOT LIKE 'a%') ORDER BY id",
+    "SELECT id FROM users WHERE name NOT LIKE 'a%' AND age NOT IN (35) ORDER BY id",
+    "SELECT id, CASE WHEN name NOT LIKE 'a%' THEN 'y' ELSE 'n' END FROM users ORDER BY id",
+    "SELECT COUNT(*) FROM users WHERE joined NOT LIKE '2020%'",
     "SELECT name FROM users WHERE dept_id IN (SELECT id FROM depts WHERE dept = 'eng')",
     "SELECT name FROM users WHERE dept_id NOT IN (SELECT id FROM depts WHERE dept = 'hr') "
     "AND dept_id IS NOT NULL",
