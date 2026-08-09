@@ -519,6 +519,14 @@ class TestDelete:
             )
         assert len(all_rows(conn, "users")) == 4
 
+    def test_delete_with_a_predicate_on_outer_columns_only(self, conn):
+        # 押し出しも SELECT と同じ経路。age が NULL の bob は消えない
+        conn.execute(
+            "DELETE FROM users WHERE EXISTS (SELECT 1 FROM depts d "
+            "WHERE users.age IS NOT NULL AND d.id = users.dept_id)"
+        )
+        assert [r[0] for r in all_rows(conn, "users")] == [2, 3]
+
 
 class TestReturning:
     def names(self, cur):

@@ -439,6 +439,160 @@ class TestCorrelatedExists:
             )
 
 
+class TestCorrelatedExistsNormalization:
+    """decorrelate が書き換えたうえで結果を間違える形を、渡す前に均す。"""
+
+    def test_group_by_does_not_duplicate_outer_rows(self, conn):
+        # dept_id 1 は 2 行あるので、GROUP BY x.id のまま渡すと結合キーが
+        # 一意にならず、alice と dave が 2 度ずつ返る
+        rows = q(
+            conn,
+            "SELECT u.id FROM users u WHERE EXISTS "
+            "(SELECT 1 FROM users x WHERE x.dept_id = u.dept_id GROUP BY x.id) ORDER BY u.id",
+        )
+        assert rows == [(1,), (2,), (4,)]
+
+    def test_group_by_under_not_exists(self, conn):
+        rows = q(
+            conn,
+            "SELECT u.id FROM users u WHERE NOT EXISTS "
+            "(SELECT 1 FROM users x WHERE x.dept_id = u.dept_id GROUP BY x.id) ORDER BY u.id",
+        )
+        assert rows == [(3,)]
+
+    def test_group_by_on_the_correlation_key(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM users u WHERE EXISTS "
+            "(SELECT 1 FROM depts d WHERE d.id = u.dept_id GROUP BY d.id) ORDER BY id",
+        )
+        assert rows == [(1,), (2,), (4,)]
+
+    def test_aggregate_without_group_by_is_always_true(self, conn):
+        # 集約は行が無くても 1 行返すので、EXISTS は dept_id によらず真になる
+        rows = q(
+            conn,
+            "SELECT id FROM users u WHERE EXISTS "
+            "(SELECT COUNT(*) FROM depts d WHERE d.id = u.dept_id) ORDER BY id",
+        )
+        assert rows == [(1,), (2,), (3,), (4,)]
+
+    def test_aggregate_without_group_by_under_not_exists(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM users u WHERE NOT EXISTS "
+            "(SELECT MAX(d.id) FROM depts d WHERE d.id = u.dept_id) ORDER BY id",
+        )
+        assert rows == []
+
+    def test_order_by_in_the_subquery(self, conn):
+        # EXISTS は行の有無しか見ないので ORDER BY は結果を変えない
+        rows = q(
+            conn,
+            "SELECT id FROM users u WHERE EXISTS "
+            "(SELECT 1 FROM depts d WHERE d.id = u.dept_id ORDER BY d.dept) ORDER BY id",
+        )
+        assert rows == [(1,), (2,), (4,)]
+
+    def test_predicate_on_outer_columns_only(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM users u WHERE EXISTS "
+            "(SELECT 1 FROM depts d WHERE u.age IS NOT NULL AND d.id = u.dept_id) ORDER BY id",
+        )
+        assert rows == [(1,), (4,)]
+
+    def test_predicate_on_outer_columns_only_under_not_exists(self, conn):
+        # 押し出した述語が NULL の行(age が NULL の bob)は、NOT EXISTS で真になる
+        rows = q(
+            conn,
+            "SELECT id FROM users u WHERE NOT EXISTS "
+            "(SELECT 1 FROM depts d WHERE u.age IS NOT NULL AND d.id = u.dept_id) ORDER BY id",
+        )
+        assert rows == [(2,), (3,)]
+
+    def test_negated_predicate_on_outer_columns_only(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM users u WHERE EXISTS "
+            "(SELECT 1 FROM depts d WHERE NOT (u.age > 30) AND d.id = u.dept_id) ORDER BY id",
+        )
+        assert rows == [(1,)]
+
+    def test_between_on_outer_columns_only(self, conn):
+        # 押し出すと decorrelate が BETWEEN を相関条件として見ないので通る
+        rows = q(
+            conn,
+            "SELECT id FROM users u WHERE EXISTS "
+            "(SELECT 1 FROM depts d WHERE u.age BETWEEN 26 AND 40 AND d.id = u.dept_id) "
+            "ORDER BY id",
+        )
+        assert rows == [(1,), (4,)]
+
+    def test_in_on_outer_columns_only(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM users u WHERE EXISTS "
+            "(SELECT 1 FROM depts d WHERE u.age IN (30, 35) AND d.id = u.dept_id) ORDER BY id",
+        )
+        assert rows == [(1,), (4,)]
+
+    def test_subquery_left_uncorrelated_by_the_push_out(self, conn):
+        # 相関する述語が全部出ていくと、残りは非相関 EXISTS として畳まれる
+        rows = q(
+            conn,
+            "SELECT id FROM users u WHERE EXISTS "
+            "(SELECT 1 FROM depts d WHERE u.age IS NOT NULL) ORDER BY id",
+        )
+        assert rows == [(1,), (3,), (4,)]
+
+    def test_push_out_from_a_nested_correlated_subquery(self, conn):
+        # 押し出し先がさらに相関サブクエリなので、スコープを組み直して繰り返す
+        rows = q(
+            conn,
+            "SELECT id FROM users u WHERE EXISTS (SELECT 1 FROM depts d "
+            "WHERE d.id = u.dept_id AND EXISTS "
+            "(SELECT 1 FROM users x WHERE x.dept_id = d.id AND u.age IS NOT NULL)) ORDER BY id",
+        )
+        assert rows == [(1,), (4,)]
+
+    def test_group_by_with_having_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="GROUP BY ... HAVING"):
+            q(
+                conn,
+                "SELECT u.id FROM users u WHERE EXISTS (SELECT 1 FROM users x "
+                "WHERE x.dept_id = u.dept_id GROUP BY x.id HAVING COUNT(*) > 0)",
+            )
+
+    def test_negated_predicate_across_both_sides_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="negated predicate"):
+            q(
+                conn,
+                "SELECT id FROM users u WHERE EXISTS "
+                "(SELECT 1 FROM depts d WHERE NOT (d.dept = u.name) AND d.id = u.dept_id)",
+            )
+
+    def test_the_negation_error_suggests_a_rewrite(self, conn):
+        with pytest.raises(NotSupportedError) as excinfo:
+            q(
+                conn,
+                "SELECT id FROM users u WHERE EXISTS "
+                "(SELECT 1 FROM depts d WHERE NOT (d.dept = u.name) AND d.id = u.dept_id)",
+            )
+        message = str(excinfo.value)
+        assert "u.k <> s.k" in message
+
+    def test_unrewritable_shape_reports_the_correlation_first(self, conn):
+        # OR があると decorrelate はそもそも書き換えない。NOT より OR が原因なので、
+        # 書き換えられない形としてのメッセージを出す
+        with pytest.raises(NotSupportedError, match="cannot be rewritten as a join"):
+            q(
+                conn,
+                "SELECT id FROM users u WHERE EXISTS "
+                "(SELECT 1 FROM depts d WHERE d.id = u.dept_id OR u.age IS NOT NULL)",
+            )
+
+
 class TestLiteralInThreeValuedLogic:
     """リテラルの並びに対する IN / NOT IN の NULL の扱い。"""
 

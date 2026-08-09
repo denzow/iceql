@@ -23,7 +23,9 @@ sqlglot の optimizer が扱えないサブクエリは rewrite_subqueries で�
 
 相関 EXISTS は sqlglot の decorrelate が join へ書き換える。書き換えられない形
 (相関条件に等値が無い、OR がある、など)は EXISTS 式が AST に残り、やはり
-sqlglot.executor が構文エラーを返すので、実行の前に拒否する。
+sqlglot.executor が構文エラーを返すので、実行の前に拒否する。書き換えられても
+結果が元の意味とずれる形もあるので、decorrelate に渡す前に均す
+(_normalize_correlated_exists)。
 
 sqlglot.executor は SQL 式を Python 式に落として評価する。IN と NOT は Python の
 集合の帰属判定と ``not`` にそのまま落ちて NULL を伝播しないので、三値論理どおりに
@@ -568,6 +570,178 @@ def _reject_correlated(scope: Scope, clause: str) -> None:
     )
 
 
+class _DeferredRejection(Exception):
+    """正規化の途中で決めた、あとで報告する拒否理由。
+
+    そもそも書き換えられない相関 EXISTS(相関条件に等値が無い、OR がある、など)は
+    _reject_unnestable_exists のメッセージのほうが原因を正しく指す。正規化の中で
+    拒否を決めても、その場では投げずに持ち帰って、あの判定の後ろで投げる。
+    """
+
+
+def _conjuncts(node: exp.Expression) -> list[exp.Expression]:
+    """AND と括弧だけでたどれる連言の要素を返す。
+
+    ここで拾える位置なら、要素を取り除いても残りの意味は変わらない。OR や NOT の
+    下にある述語は要素として返らない(node そのものが 1 要素として返る)。
+    """
+    stack = [node]
+    parts: list[exp.Expression] = []
+    while stack:
+        current = stack.pop()
+        if isinstance(current, exp.And):
+            stack.extend([current.this, current.expression])
+        elif isinstance(current, exp.Paren):
+            stack.append(current.this)
+        else:
+            parts.append(current)
+    return parts
+
+
+def _push_out_outer_predicates(scope: Scope, exists: exp.Exists, where: exp.Where) -> bool:
+    """外側の列だけで決まる述語を、サブクエリから EXISTS の外へ出す。
+
+    ``EXISTS (SELECT ... WHERE P AND Q)`` は、P が外側の列だけで決まるなら
+    ``P AND EXISTS (SELECT ... WHERE Q)`` と同じ値になる。押し出しておくと
+    decorrelate が P を相関条件として扱わなくなり、否定を落とす経路にも
+    BETWEEN や IN で書き換えをあきらめる経路にも入らない。
+
+    P を ``COALESCE(P, FALSE)`` に包むのは、P が NULL の行で ``NOT EXISTS`` の
+    結果が変わるためである。押し出す前は、P が真でない行はサブクエリに残らない
+    ので EXISTS は偽、その否定は真になる。``P AND EXISTS (...)`` と素朴に書くと
+    ``NULL AND TRUE`` が NULL になり、NOT を通しても NULL のままで行が落ちる。
+    """
+    external = {id(column) for column in scope.external_columns}
+    pushed: list[exp.Expression] = []
+    for conjunct in _conjuncts(where.this):
+        columns = list(conjunct.find_all(exp.Column))
+        if not columns or conjunct.find(exp.Select) is not None:
+            # 列を含まない述語は動かす意味が無く、サブクエリを含む述語は
+            # 動かすとスコープが変わる
+            continue
+        if all(id(column) in external for column in columns):
+            pushed.append(conjunct.copy())
+            conjunct.replace(exp.true())
+    if not pushed:
+        return False
+    condition: exp.Condition = exists.copy()
+    for predicate in pushed:
+        condition = exp.and_(
+            exp.Coalesce(this=exp.paren(predicate), expressions=[exp.false()]), condition
+        )
+    exists.replace(exp.paren(condition))
+    return True
+
+
+def _normalize_exists_subquery(scope: Scope, select: exp.Select) -> bool:
+    """相関 EXISTS のサブクエリを、decorrelate が正しく扱える形に均す。
+
+    decorrelate は書き換えをあきらめるだけでなく、書き換えたうえで元の意味と
+    ずれた結果を返すことがある。ずれるのは次の 4 つで、いずれも黙った誤答になる。
+
+    - GROUP BY を持つ: 相関条件の列に加えて GROUP BY の列でも集約するので
+      結合キーが一意にならず、行の有無しか見ないはずの EXISTS で外側の行が増える
+    - GROUP BY の無い集約: 集約は行が無くても 1 行返すので EXISTS は常に真だが、
+      decorrelate は EXISTS の射影を捨てるため、行の有無で答えてしまう
+    - ORDER BY を持つ: 射影を捨てられたあとも ORDER BY が残り、ソートキーの列を
+      引けずに実行が落ちる(誤答ではないが、SQL からは追えないエラーになる)
+    - 外側の列を含む述語が NOT の下にある: decorrelate はその述語を TRUE に
+      差し替えて親側へ移すが、差し替えるのは述語のノードだけなので、外側の NOT が
+      サブクエリの WHERE に残って ``NOT TRUE`` になり、条件全体が偽になる
+
+    前の 3 つは、行の有無を変えずに GROUP BY と ORDER BY を外す(集約は真に畳む)。
+    4 つ目は、述語が外側の列しか含まないなら EXISTS の外へ押し出せる。押し出せない
+    形と、GROUP BY と HAVING を両方持つ形(HAVING は行の有無を変えるので GROUP BY を
+    外せない)は拒否する。
+
+    返り値は AST を書き換えたかどうか。押し出しは一つ外側のスコープの相関を増やす
+    ので、呼び出し元がスコープを組み直して変化が無くなるまで繰り返す。
+    """
+    exists = cast("exp.Exists", select.parent)
+    group = node_arg(select, "group")
+    having = node_arg(select, "having")
+    if (
+        group is None
+        and having is None
+        and any(projection.find(exp.AggFunc) for projection in select.expressions)
+    ):
+        exists.replace(exp.true())
+        return True
+    changed = False
+    if node_arg(select, "order") is not None:
+        select.set("order", None)
+        changed = True
+    if group is not None:
+        if having is not None:
+            raise _DeferredRejection(
+                "a correlated EXISTS whose subquery has GROUP BY ... HAVING is not "
+                "supported (the join rewrite would duplicate outer rows): "
+                f"EXISTS ({select.sql(dialect=SQL_DIALECT)}); "
+                "rewrite it as a join against the grouped subquery, e.g. "
+                "SELECT DISTINCT s.id FROM s JOIN (SELECT u.id FROM u GROUP BY u.id "
+                "HAVING COUNT(*) > 1) g ON g.id = s.id"
+            )
+        # グループの数は行の有無を変えない。射影は decorrelate が捨てるが、
+        # 集約が残ったままだと「GROUP BY の無い集約」に化けるので 1 に置き換える。
+        select.set("group", None)
+        select.set("expressions", [exp.Literal.number(1)])
+        changed = True
+    where = node_arg(select, "where")
+    if not isinstance(where, exp.Where):
+        return changed
+    changed |= _push_out_outer_predicates(scope, exists, where)
+    for column in scope.external_columns:
+        if column.find_ancestor(exp.Where) is not where:
+            continue  # 押し出したので、この列はもうサブクエリに無い
+        if isinstance(column.find_ancestor(exp.Not, exp.Where), exp.Not):
+            raise _DeferredRejection(
+                "a correlated EXISTS with a negated predicate on "
+                f"{column.sql(dialect=SQL_DIALECT)} is not supported "
+                "(the join rewrite drops the negation): "
+                f"EXISTS ({select.sql(dialect=SQL_DIALECT)}); "
+                "write the predicate without NOT, e.g. u.k <> s.k instead of "
+                "NOT (u.k = s.k)"
+            )
+    return changed
+
+
+def _normalize_correlated_exists(ast: exp.Expression) -> str | None:
+    """相関 EXISTS のサブクエリを、変化が無くなるまで均す。
+
+    押し出しは一つ外側のスコープの相関を増やすので、スコープを組み直して繰り返す。
+    1 度で済ませると、押し出し先がさらに相関サブクエリである形
+    (``EXISTS (... WHERE u.id = s.id AND EXISTS (... WHERE v.id = u.id AND s.k IS NOT NULL))``)
+    で同じ誤答が残る。
+
+    返り値は、見つかった拒否理由(無ければ None)。呼び出し元が
+    _reject_unnestable_exists の後ろで投げる。
+    """
+    if ast.find(exp.Exists) is None:
+        return None
+    rejection: str | None = None
+    while True:
+        root = build_scope(ast)
+        if root is None:
+            break
+        changed = False
+        for scope in root.traverse():
+            select = scope.expression
+            if not isinstance(select, exp.Select) or not isinstance(select.parent, exp.Exists):
+                continue
+            if not scope.external_columns:
+                continue
+            if node_arg(select, "limit") or node_arg(select, "offset"):
+                continue  # 相関サブクエリの LIMIT / OFFSET は呼び出し元が拒否する
+            try:
+                changed |= _normalize_exists_subquery(scope, select)
+            except _DeferredRejection as exc:
+                if rejection is None:
+                    rejection = str(exc)
+        if not changed:
+            break
+    return rejection
+
+
 def _reject_unnestable_exists(ast: exp.Expression) -> None:
     """sqlglot が join へ書き換えられない相関 EXISTS を、実行の前に拒否する。
 
@@ -629,6 +803,9 @@ def rewrite_subqueries(
         )
     except OptimizeError as exc:
         raise ProgrammingError(f"invalid query: {exc}") from exc
+    # 均すのは評価の対象を集める前。押し出しは EXISTS を作り直すので、
+    # そのサブクエリの中にある評価の対象を先に集めると参照が外れる。
+    exists_rejection = _normalize_correlated_exists(ast)
     root = build_scope(ast)
     if root is None:
         raise NotSupportedError("subqueries in this position are not supported")
@@ -675,6 +852,8 @@ def rewrite_subqueries(
     if ast.find(exp.Limit, exp.Offset) is not None:
         raise NotSupportedError("LIMIT / OFFSET in this position is not supported")
     _reject_unnestable_exists(ast)
+    if exists_rejection is not None:
+        raise NotSupportedError(exists_rejection)
     return ast
 
 

@@ -181,6 +181,36 @@ SELECT_QUERIES = [
     "(SELECT 1 FROM depts d WHERE d.id = u.dept_id AND d.dept > 'a') ORDER BY u.id",
     "SELECT u.id FROM users u WHERE NOT EXISTS "
     "(SELECT 1 FROM depts d WHERE d.id = u.dept_id AND d.dept > 'e') ORDER BY u.id",
+    # 相関 EXISTS のうち、decorrelate に渡す前に均す形
+    "SELECT u.id FROM users u WHERE EXISTS "
+    "(SELECT 1 FROM users x WHERE x.dept_id = u.dept_id GROUP BY x.id) ORDER BY u.id",
+    "SELECT u.id FROM users u WHERE NOT EXISTS "
+    "(SELECT 1 FROM users x WHERE x.dept_id = u.dept_id GROUP BY x.id) ORDER BY u.id",
+    "SELECT u.id FROM users u WHERE EXISTS "
+    "(SELECT x.age FROM users x WHERE x.dept_id = u.dept_id GROUP BY x.age) ORDER BY u.id",
+    "SELECT u.id FROM users u WHERE EXISTS "
+    "(SELECT COUNT(*) FROM depts d WHERE d.id = u.dept_id) ORDER BY u.id",
+    "SELECT u.id FROM users u WHERE NOT EXISTS "
+    "(SELECT MAX(d.id) FROM depts d WHERE d.id = u.dept_id) ORDER BY u.id",
+    "SELECT u.id FROM users u WHERE EXISTS "
+    "(SELECT 1 FROM depts d WHERE d.id = u.dept_id ORDER BY d.dept) ORDER BY u.id",
+    "SELECT u.id FROM users u WHERE EXISTS "
+    "(SELECT 1 FROM depts d WHERE u.age IS NOT NULL AND d.id = u.dept_id) ORDER BY u.id",
+    "SELECT u.id FROM users u WHERE NOT EXISTS "
+    "(SELECT 1 FROM depts d WHERE u.age IS NOT NULL AND d.id = u.dept_id) ORDER BY u.id",
+    "SELECT u.id FROM users u WHERE EXISTS "
+    "(SELECT 1 FROM depts d WHERE NOT (u.age > 30) AND d.id = u.dept_id) ORDER BY u.id",
+    "SELECT u.id FROM users u WHERE EXISTS "
+    "(SELECT 1 FROM depts d WHERE u.age BETWEEN 26 AND 40 AND d.id = u.dept_id) ORDER BY u.id",
+    "SELECT u.id FROM users u WHERE EXISTS "
+    "(SELECT 1 FROM depts d WHERE u.age IN (30, 35) AND d.id = u.dept_id) ORDER BY u.id",
+    "SELECT u.id FROM users u WHERE EXISTS "
+    "(SELECT 1 FROM depts d WHERE u.age IS NOT NULL) ORDER BY u.id",
+    "SELECT u.id FROM users u WHERE EXISTS (SELECT 1 FROM depts d "
+    "WHERE d.id = u.dept_id AND EXISTS "
+    "(SELECT 1 FROM users x WHERE x.dept_id = d.id AND u.age IS NOT NULL)) ORDER BY u.id",
+    "SELECT COUNT(*) FROM users u WHERE EXISTS "
+    "(SELECT 1 FROM users x WHERE x.dept_id = u.dept_id GROUP BY x.id)",
     "WITH grown AS (SELECT * FROM users WHERE age >= 30) SELECT name FROM grown",
     "SELECT id FROM (SELECT id FROM users ORDER BY id LIMIT 2) x ORDER BY id",
     "SELECT id, name FROM (SELECT id, name FROM users ORDER BY id DESC LIMIT 3) x "

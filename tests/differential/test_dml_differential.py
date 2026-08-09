@@ -124,6 +124,12 @@ SUBQUERY_DML_CASES = [
         "DELETE FROM t WHERE id NOT IN (SELECT id FROM u)",
         "UPDATE t SET tag = 'z' WHERE EXISTS (SELECT 1 FROM u)",
     ],
+    # decorrelate に渡す前に均す形。rowcount にも重複や取りこぼしが出る
+    ["DELETE FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.id = t.id GROUP BY u.tag)"],
+    ["UPDATE t SET tag = 'z' WHERE EXISTS (SELECT 1 FROM u WHERE u.id = t.id GROUP BY u.tag)"],
+    ["DELETE FROM t WHERE EXISTS (SELECT 1 FROM u WHERE t.tag IS NOT NULL AND u.id = t.id)"],
+    ["DELETE FROM t WHERE NOT EXISTS (SELECT 1 FROM u WHERE t.tag IS NOT NULL AND u.id = t.id)"],
+    ["UPDATE t SET tag = 'z' WHERE EXISTS (SELECT COUNT(*) FROM u WHERE u.id = t.id)"],
 ]
 
 
