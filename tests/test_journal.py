@@ -143,7 +143,7 @@ class TestCommitJournal:
                 Column(name="v", type="integer"),
             ],
         )
-        journal.write_journal(path, {"t1": (schema, [{"id": 1, "v": 99}])})
+        journal.write_journal(path, {"t1": (schema, [(1, 99)])})
         conn2 = iceql.connect(path)
         assert conn2.execute("SELECT v FROM t1").fetchone() == (99,)
         assert not journal_file(path).exists()
@@ -265,7 +265,7 @@ class TestJournalWithDdl:
             "tables": {
                 "t1": {
                     "schema": dump_schema(schema),
-                    "csv": encode_rows([{"id": 1, "v": 77}], schema),
+                    "csv": encode_rows([(1, 77)], schema),
                 }
             },
         }

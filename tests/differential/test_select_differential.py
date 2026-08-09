@@ -61,20 +61,9 @@ def iceql_conn(tmp_path):
     )
     catalog.create_table(users)
     catalog.create_table(depts)
-    catalog.write_rows(
-        "users",
-        [
-            {
-                "id": r[0], "name": r[1], "age": r[2],
-                "dept_id": r[3], "joined": r[4], "active": bool(r[5]),
-            }
-            for r in USERS_ROWS
-        ],
-        users,
-    )
-    catalog.write_rows(
-        "depts", [{"id": r[0], "dept": r[1]} for r in DEPTS_ROWS], depts
-    )
+    # sqlite3 は boolean を 0/1 で持つので、iceql 側だけ bool へ直す
+    catalog.write_rows("users", [(*r[:5], bool(r[5])) for r in USERS_ROWS], users)
+    catalog.write_rows("depts", list(DEPTS_ROWS), depts)
     yield conn
     conn.close()
 

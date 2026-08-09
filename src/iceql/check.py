@@ -22,13 +22,13 @@ class Issue:
 
 
 def _check_primary_key(schema: TableSchema, rows: list[Row]) -> list[Issue]:
-    pk = schema.primary_key
-    if not pk:
+    indexes = [schema.column_index(c) for c in schema.primary_key]
+    if not indexes:
         return []
     issues = []
     seen = set()
     for i, row in enumerate(rows, start=2):
-        key = tuple(row[c] for c in pk)
+        key = tuple(row[j] for j in indexes)
         if key in seen:
             issues.append(
                 Issue("error", schema.table, f"line {i}: duplicate primary key {key!r}")
@@ -74,8 +74,8 @@ def check_database(dbdir: str | Path) -> list[Issue]:
             continue
         # NOT NULL は read_rows では検査されない(型 decode は NULL を素通しする)
         for i, row in enumerate(rows, start=2):
-            for col in schema.columns:
-                if not col.nullable and row[col.name] is None:
+            for j, col in enumerate(schema.columns):
+                if not col.nullable and row[j] is None:
                     issues.append(
                         Issue(
                             "error",

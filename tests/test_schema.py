@@ -40,23 +40,43 @@ class TestTableSchema:
         assert make_schema().primary_key == ["id"]
 
 
-class TestValidateRow:
-    def test_applies_default_and_order(self):
-        row = make_schema().validate_row({"name": "alice", "id": 1})
-        assert list(row) == ["id", "name", "bio", "active"]
-        assert row == {"id": 1, "name": "alice", "bio": None, "active": True}
+class TestValidateValues:
+    def test_normalizes_values(self):
+        assert make_schema().validate_values([1, "alice", None, True]) == (
+            1,
+            "alice",
+            None,
+            True,
+        )
+
+    def test_length_mismatch(self):
+        with pytest.raises(DataError, match="4 columns"):
+            make_schema().validate_values([1, "alice"])
 
     def test_not_null_violation(self):
         with pytest.raises(IntegrityError):
-            make_schema().validate_row({"id": 1, "name": None})
-
-    def test_unknown_column(self):
-        with pytest.raises(DataError):
-            make_schema().validate_row({"id": 1, "name": "a", "nope": 1})
+            make_schema().validate_values([1, None, None, True])
 
     def test_type_check(self):
         with pytest.raises(DataError):
-            make_schema().validate_row({"id": "abc", "name": "a"})
+            make_schema().validate_values(["abc", "a", None, True])
+
+
+class TestBuildRow:
+    def test_applies_default_and_order(self):
+        row = make_schema().build_row(["name", "id"], ["alice", 1])
+        assert row == (1, "alice", None, True)
+
+    def test_unknown_column(self):
+        with pytest.raises(DataError, match="no such column"):
+            make_schema().build_row(["id", "name", "nope"], [1, "a", 1])
+
+    def test_duplicate_column(self):
+        with pytest.raises(DataError, match="more than once"):
+            make_schema().build_row(["id", "id", "name"], [1, 2, "a"])
+
+    def test_column_index(self):
+        assert make_schema().column_index("bio") == 2
 
 
 class TestYamlRoundtrip:

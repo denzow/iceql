@@ -9,6 +9,7 @@ SELECT と完全に一致し、式評価器を自前で持たずに済む。
 from __future__ import annotations
 
 from sqlglot import exp
+from sqlglot.executor.table import Table
 
 from iceql.catalog import Catalog
 from iceql.engine import StatementResult, executor
@@ -44,12 +45,12 @@ def _eval_constant(node: exp.Expression) -> Value:
 
 
 def _check_primary_key(schema: TableSchema, rows: list[Row]) -> None:
-    pk = schema.primary_key
-    if not pk:
+    indexes = [schema.column_index(c) for c in schema.primary_key]
+    if not indexes:
         return
     seen: set[tuple[Value, ...]] = set()
     for row in rows:
-        key = tuple(row[c] for c in pk)
+        key = tuple(row[i] for i in indexes)
         if key in seen:
             raise IntegrityError(
                 f"UNIQUE constraint failed: {schema.table} primary key {key!r}"
@@ -71,11 +72,13 @@ def _rowid_tables(
     table: str,
     schema: TableSchema,
     rows: list[Row],
-) -> tuple[dict[str, list[Row]], dict[str, dict[str, str]]]:
+) -> tuple[dict[str, Table], dict[str, dict[str, str]]]:
     """対象テーブルに _rowid_ を注入し、サブクエリが参照する他テーブルも揃える。"""
     others = executor.physical_tables(select, catalog) - {table}
     tables, annotations = executor.load_tables(catalog, others)
-    tables[table] = [{ROWID: i, **row} for i, row in enumerate(rows)]
+    tables[table] = executor.sqlglot_table(
+        [ROWID, *schema.column_names], [(i, *row) for i, row in enumerate(rows)]
+    )
     annotation = {ROWID: "bigint"}
     annotation.update(
         {c.name: executor._SQLGLOT_TYPES[c.type] for c in schema.columns}
@@ -118,7 +121,7 @@ def run_insert(catalog: Catalog, ast: exp.Insert) -> StatementResult:
             raise ProgrammingError(
                 f"INSERT has {len(values)} values for {len(columns)} columns"
             )
-        rows.append(schema.validate_row(dict(zip(columns, values, strict=True))))
+        rows.append(schema.build_row(columns, values))
     _check_primary_key(schema, rows)
     catalog.write_rows(table, rows, schema)
     return StatementResult(rowcount=len(new_values))
@@ -151,13 +154,14 @@ def run_update(catalog: Catalog, ast: exp.Update) -> StatementResult:
     tables, annotations = _rowid_tables(catalog, select, table, schema, rows)
     _, matched = executor.evaluate(select, tables, annotations)
 
+    set_indexes = [schema.column_index(column) for column, _ in set_items]
     for row in matched:
         rowid = row[0]
         assert isinstance(rowid, int)
-        updated = dict(rows[rowid])
-        for (column, _), value in zip(set_items, row[1:], strict=True):
-            updated[column] = value
-        rows[rowid] = schema.validate_row(updated)
+        updated = list(rows[rowid])
+        for index, value in zip(set_indexes, row[1:], strict=True):
+            updated[index] = value
+        rows[rowid] = schema.validate_values(updated)
     _check_primary_key(schema, rows)
     catalog.write_rows(table, rows, schema)
     return StatementResult(rowcount=len(matched))

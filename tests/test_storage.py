@@ -14,11 +14,11 @@ SCHEMA = TableSchema(
 )
 
 ROWS = [
-    {"id": 1, "note": "hello", "score": 1.5},
-    {"id": 2, "note": None, "score": None},
-    {"id": 3, "note": "", "score": -0.25},
-    {"id": 4, "note": "a,b \"quoted\"\nmultiline", "score": 0.0},
-    {"id": 5, "note": "\\N", "score": 2.0},
+    (1, "hello", 1.5),
+    (2, None, None),
+    (3, "", -0.25),
+    (4, "a,b \"quoted\"\nmultiline", 0.0),
+    (5, "\\N", 2.0),
 ]
 
 
@@ -37,14 +37,14 @@ def test_null_vs_empty_string_distinct(tmp_path):
     path = tmp_path / "t.csv"
     write_rows(path, ROWS, SCHEMA)
     back = read_rows(path, SCHEMA)
-    assert back[1]["note"] is None
-    assert back[2]["note"] == ""
+    assert back[1][1] is None
+    assert back[2][1] == ""
 
 
 def test_crlf_accepted(tmp_path):
     path = tmp_path / "t.csv"
     path.write_text("id,note,score\r\n1,x,1.0\r\n", encoding="utf-8")
-    assert read_rows(path, SCHEMA) == [{"id": 1, "note": "x", "score": 1.0}]
+    assert read_rows(path, SCHEMA) == [(1, "x", 1.0)]
 
 
 def test_header_mismatch(tmp_path):

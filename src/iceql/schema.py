@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -69,26 +70,47 @@ class TableSchema:
                 return col
         raise DataError(f"no such column: {self.table}.{name}")
 
-    def validate_row(self, row: dict[str, Value]) -> dict[str, Value]:
-        """行を検証し、列順を揃えた dict を返す。余分・不足キーはエラー。"""
-        unknown = set(row) - set(self.column_names)
-        if unknown:
-            raise DataError(f"unknown columns for {self.table!r}: {sorted(unknown)}")
-        out: dict[str, Value] = {}
-        for col in self.columns:
-            value = row.get(col.name, col.default)
+    def column_index(self, name: str) -> int:
+        for i, col in enumerate(self.columns):
+            if col.name == name:
+                return i
+        raise DataError(f"no such column: {self.table}.{name}")
+
+    def validate_values(self, values: Sequence[Value]) -> tuple[Value, ...]:
+        """列順に並んだ値を検証し、型を正規化した行を返す。"""
+        if len(values) != len(self.columns):
+            raise DataError(
+                f"table {self.table!r} has {len(self.columns)} columns, "
+                f"got {len(values)} values"
+            )
+        out: list[Value] = []
+        for col, value in zip(self.columns, values, strict=True):
             if value is None:
                 if not col.nullable:
                     raise IntegrityError(
                         f"NOT NULL constraint failed: {self.table}.{col.name}"
                     )
-                out[col.name] = None
+                out.append(None)
                 continue
             codec = get_type(col.type)
             encoded = codec.encode(value)
             assert encoded is not None
-            out[col.name] = codec.decode(encoded)
-        return out
+            out.append(codec.decode(encoded))
+        return tuple(out)
+
+    def build_row(
+        self, columns: Sequence[str], values: Sequence[Value]
+    ) -> tuple[Value, ...]:
+        """列指定つきの値から、列順に並べた行を組む。指定の無い列は DEFAULT。"""
+        row: list[Value] = [c.default for c in self.columns]
+        assigned: set[int] = set()
+        for name, value in zip(columns, values, strict=True):
+            index = self.column_index(name)  # 存在しなければ DataError
+            if index in assigned:
+                raise DataError(f"column specified more than once: {self.table}.{name}")
+            assigned.add(index)
+            row[index] = value
+        return self.validate_values(row)
 
 
 def _column_to_yaml(col: Column) -> dict[str, Any]:

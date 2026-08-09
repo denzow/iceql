@@ -33,8 +33,8 @@ def schema_and_rows(draw):
         for name in names
     ]
     schema = TableSchema(table="t", columns=columns)
-    row_strategy = st.fixed_dictionaries(
-        {c.name: st.none() | TYPE_VALUE_STRATEGIES[c.type] for c in columns}
+    row_strategy = st.tuples(
+        *(st.none() | TYPE_VALUE_STRATEGIES[c.type] for c in columns)
     )
     rows = draw(st.lists(row_strategy, max_size=20))
     return schema, rows
@@ -44,8 +44,7 @@ def rows_equal(a, b):
     if len(a) != len(b):
         return False
     for ra, rb in zip(a, b, strict=False):
-        for k in ra:
-            va, vb = ra[k], rb[k]
+        for va, vb in zip(ra, rb, strict=True):
             if isinstance(va, float) and isinstance(vb, float):
                 if not (math.isclose(va, vb) or (va == 0.0 and vb == 0.0)):
                     return False

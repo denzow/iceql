@@ -42,7 +42,7 @@ def test_create_duplicate(db):
 def test_write_and_read_rows(db):
     schema = users_schema()
     db.create_table(schema)
-    rows = [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+    rows = [(1, "alice"), (2, "bob")]
     db.write_rows("users", rows, schema)
     assert db.read_rows("users") == rows
 
@@ -73,10 +73,10 @@ def test_drop_table(db):
 def test_rename_table(db):
     schema = users_schema()
     db.create_table(schema)
-    db.write_rows("users", [{"id": 1, "name": "alice"}], schema)
+    db.write_rows("users", [(1, "alice")], schema)
     db.rename_table("users", "members")
     assert db.list_tables() == ["members"]
-    assert db.read_rows("members") == [{"id": 1, "name": "alice"}]
+    assert db.read_rows("members") == [(1, "alice")]
 
 
 def test_path_traversal_rejected(db):

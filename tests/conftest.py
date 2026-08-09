@@ -29,24 +29,17 @@ def conn(tmp_path):
     )
     catalog.create_table(users)
     catalog.create_table(depts)
+    # 行は users / depts の列順に並べた tuple
     catalog.write_rows(
         "users",
         [
-            {"id": 1, "name": "alice", "age": 30, "dept_id": 1,
-             "joined": "2020-01-15", "active": True},
-            {"id": 2, "name": "bob", "age": None, "dept_id": 2,
-             "joined": "2021-06-01", "active": True},
-            {"id": 3, "name": "carol", "age": 25, "dept_id": None,
-             "joined": None, "active": False},
-            {"id": 4, "name": "dave", "age": 35, "dept_id": 1,
-             "joined": "2019-11-30", "active": True},
+            (1, "alice", 30, 1, "2020-01-15", True),
+            (2, "bob", None, 2, "2021-06-01", True),
+            (3, "carol", 25, None, None, False),
+            (4, "dave", 35, 1, "2019-11-30", True),
         ],
         users,
     )
-    catalog.write_rows(
-        "depts",
-        [{"id": 1, "dept": "eng"}, {"id": 2, "dept": "sales"}],
-        depts,
-    )
+    catalog.write_rows("depts", [(1, "eng"), (2, "sales")], depts)
     yield connection
     connection.close()

@@ -133,21 +133,17 @@ def _alter_add_column(
             "to a non-empty table"
         )
     new_schema = TableSchema(table=schema.table, columns=[*schema.columns, column])
-    for row in rows:
-        row[column.name] = column.default
-    catalog.write_table(new_schema, rows)
+    catalog.write_table(new_schema, [(*row, column.default) for row in rows])
 
 
 def _alter_drop_column(catalog: Catalog, schema: TableSchema, name: str) -> None:
-    schema.column(name)  # 存在チェック
+    index = schema.column_index(name)  # 存在チェックを兼ねる
     remaining = [c for c in schema.columns if c.name != name]
     if not remaining:
         raise ProgrammingError(f"cannot drop the only column of {schema.table!r}")
     rows = catalog.read_rows(schema.table)
     new_schema = TableSchema(table=schema.table, columns=remaining)
-    for row in rows:
-        row.pop(name, None)
-    catalog.write_table(new_schema, rows)
+    catalog.write_table(new_schema, [row[:index] + row[index + 1 :] for row in rows])
 
 
 def _alter_rename_column(
@@ -166,11 +162,9 @@ def _alter_rename_column(
         )
         for c in schema.columns
     ]
-    rows = catalog.read_rows(schema.table)
+    # 行は列順に並んだ値なので、列名を変えても中身は動かない
     new_schema = TableSchema(table=schema.table, columns=columns)
-    for row in rows:
-        row[new] = row.pop(old)
-    catalog.write_table(new_schema, rows)
+    catalog.write_table(new_schema, catalog.read_rows(schema.table))
 
 
 def run_alter(catalog: Catalog, ast: exp.Alter) -> StatementResult:

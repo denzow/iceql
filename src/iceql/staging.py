@@ -59,8 +59,9 @@ class StagedCatalog(Catalog):
         if isinstance(entry, _Dropped):
             raise ProgrammingError(f"no such table: {table}")
         if entry is not None:
-            # DML は返された行を直接書き換えるため、ステージ本体と共有しない
-            return [dict(row) for row in entry[1]]
+            # DML は返されたリストを直接書き換えるため、ステージ本体と共有しない
+            # (行そのものは tuple で不変なので、リストの複製だけで足りる)
+            return list(entry[1])
         return self._base.read_rows(table)
 
     def write_rows(self, table: str, rows: list[Row], schema: TableSchema) -> None:

@@ -21,7 +21,11 @@ from iceql.errors import OperationalError
 from iceql.schema import TableSchema
 from iceql.types import Value, decode_null, encode_null, get_type
 
-Row = dict[str, Value]
+# 行はスキーマの列順に並べた tuple。列名からの位置解決は TableSchema が持つ。
+# 行ごとに dict を作ると固定費が大きく(5 列で 184 バイト、tuple なら 88 バイト)、
+# しかも sqlglot の executor へ渡すたびに別表現へ複製される。tuple なら複製せず
+# そのまま渡せる(executor.sqlglot_table)。
+Row = tuple[Value, ...]
 
 
 def read_rows(path: Path, schema: TableSchema) -> list[Row]:
@@ -50,15 +54,15 @@ def read_rows(path: Path, schema: TableSchema) -> list[Row]:
                         f"{path}: line {lineno}: expected {len(schema.columns)} fields, "
                         f"got {len(record)}"
                     )
-                row: Row = {}
-                for col, codec, field in zip(schema.columns, codecs, record, strict=False):
+                values: list[Value] = []
+                for col, codec, field in zip(schema.columns, codecs, record, strict=True):
                     try:
-                        row[col.name] = codec.decode(decode_null(field))
+                        values.append(codec.decode(decode_null(field)))
                     except Exception as exc:
                         raise OperationalError(
                             f"{path}: line {lineno}: column {col.name!r}: {exc}"
                         ) from exc
-                rows.append(row)
+                rows.append(tuple(values))
         except csv.Error as exc:
             raise OperationalError(f"{path}: invalid CSV: {exc}") from exc
     return rows
@@ -85,10 +89,16 @@ def encode_rows(rows: list[Row], schema: TableSchema) -> str:
     parts = [_format_record(schema.column_names)]
     codecs = [get_type(c.type) for c in schema.columns]
     for row in rows:
-        record = []
-        for col, codec in zip(schema.columns, codecs, strict=False):
-            record.append(encode_null(codec.encode(row.get(col.name))))
-        parts.append(_format_record(record))
+        if len(row) != len(codecs):
+            raise OperationalError(
+                f"table {schema.table!r} has {len(codecs)} columns, "
+                f"got a row of {len(row)} values"
+            )
+        parts.append(
+            _format_record(
+                [encode_null(codec.encode(v)) for codec, v in zip(codecs, row, strict=True)]
+            )
+        )
     return "".join(parts)
 
 
