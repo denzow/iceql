@@ -126,6 +126,31 @@ SELECT_QUERIES = [
     "WITH top2 AS (SELECT id, name FROM users ORDER BY id DESC LIMIT 2) "
     "SELECT id, name FROM top2 ORDER BY id",
     "SELECT name FROM users WHERE id = (SELECT id FROM users ORDER BY id DESC LIMIT 1)",
+    # サブクエリ内の LIMIT / OFFSET(実体化して評価する)
+    "SELECT id FROM (SELECT id FROM users ORDER BY id LIMIT 2 OFFSET 1) x ORDER BY id",
+    "WITH t AS (SELECT id, name FROM users ORDER BY id DESC LIMIT 3 OFFSET 1) "
+    "SELECT id, name FROM t ORDER BY id",
+    "SELECT name FROM users WHERE id = (SELECT id FROM users ORDER BY id LIMIT 1 OFFSET 2)",
+    "SELECT id FROM users WHERE id IN (SELECT id FROM users ORDER BY id LIMIT 2) ORDER BY id",
+    "SELECT id FROM users "
+    "WHERE id IN (SELECT id FROM users ORDER BY id DESC LIMIT 2 OFFSET 1) ORDER BY id",
+    "SELECT name FROM users "
+    "WHERE dept_id IN (SELECT id FROM depts ORDER BY id LIMIT 1) ORDER BY name",
+    "SELECT id FROM users "
+    "WHERE id IN (SELECT id FROM (SELECT id FROM users ORDER BY id LIMIT 2) z) ORDER BY id",
+    "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM depts LIMIT 1) ORDER BY id",
+    "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM depts WHERE id > 99 LIMIT 1)",
+    "SELECT id FROM users WHERE NOT EXISTS (SELECT 1 FROM depts LIMIT 1)",
+    "WITH t AS (SELECT id FROM users ORDER BY id LIMIT 3) "
+    "SELECT id FROM (SELECT id FROM t ORDER BY id DESC LIMIT 2) y ORDER BY id",
+    "SELECT COUNT(*) FROM (SELECT id FROM users ORDER BY id LIMIT 2 OFFSET 1) x",
+    "SELECT x.name, d.dept FROM (SELECT id, name, dept_id FROM users ORDER BY id LIMIT 3 "
+    "OFFSET 1) x JOIN depts d ON d.id = x.dept_id ORDER BY x.id",
+    "SELECT id FROM (SELECT id FROM users UNION SELECT id FROM depts ORDER BY id "
+    "LIMIT 3 OFFSET 1) x ORDER BY id",
+    "WITH t AS (SELECT id FROM users WHERE id <= 4) "
+    "SELECT id FROM (SELECT id FROM t UNION SELECT id FROM depts ORDER BY id "
+    "LIMIT 3 OFFSET 1) x ORDER BY id",
     "SELECT name FROM users UNION ALL SELECT dept FROM depts",
     "SELECT dept_id FROM users WHERE dept_id IS NOT NULL UNION SELECT id FROM depts",
     "SELECT UPPER(name), LOWER(name), LENGTH(name) FROM users",

@@ -54,6 +54,93 @@ class TestBasicSelect:
         )
         assert rows == [("alice",)]
 
+    def test_offset_in_from_subquery(self, conn):
+        rows = q(conn, "SELECT id FROM (SELECT id FROM users ORDER BY id LIMIT 2 OFFSET 1) x")
+        assert rows == [(2,), (3,)]
+
+    def test_offset_in_cte(self, conn):
+        rows = q(
+            conn,
+            "WITH t AS (SELECT id FROM users ORDER BY id LIMIT 2 OFFSET 1) "
+            "SELECT id FROM t ORDER BY id",
+        )
+        assert rows == [(2,), (3,)]
+
+    def test_offset_in_scalar_subquery(self, conn):
+        rows = q(
+            conn,
+            "SELECT name FROM users "
+            "WHERE id = (SELECT id FROM users ORDER BY id LIMIT 1 OFFSET 2)",
+        )
+        assert rows == [("carol",)]
+
+    def test_limit_in_in_subquery(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM users WHERE id IN (SELECT id FROM users ORDER BY id LIMIT 2) "
+            "ORDER BY id",
+        )
+        assert rows == [(1,), (2,)]
+
+    def test_offset_in_in_subquery(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM users "
+            "WHERE id IN (SELECT id FROM users ORDER BY id LIMIT 2 OFFSET 2) ORDER BY id",
+        )
+        assert rows == [(3,), (4,)]
+
+    def test_limit_nested_under_in_subquery(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM users "
+            "WHERE id IN (SELECT id FROM (SELECT id FROM users ORDER BY id LIMIT 2) z) "
+            "ORDER BY id",
+        )
+        assert rows == [(1,), (2,)]
+
+    def test_limit_in_exists_subquery(self, conn):
+        rows = q(conn, "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM depts LIMIT 1)")
+        assert rows == [(1,), (2,), (3,), (4,)]
+
+    def test_limit_in_exists_subquery_empty(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM depts WHERE id > 99 LIMIT 1)",
+        )
+        assert rows == []
+
+    def test_limit_in_not_exists_subquery(self, conn):
+        rows = q(conn, "SELECT id FROM users WHERE NOT EXISTS (SELECT 1 FROM depts LIMIT 1)")
+        assert rows == []
+
+    def test_limit_in_subquery_over_cte(self, conn):
+        # 実体化したサブクエリが外側の CTE を参照する
+        rows = q(
+            conn,
+            "WITH t AS (SELECT id FROM users ORDER BY id LIMIT 3) "
+            "SELECT id FROM (SELECT id FROM t ORDER BY id DESC LIMIT 2) y ORDER BY id",
+        )
+        assert rows == [(2,), (3,)]
+
+    def test_limit_in_union_subquery(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM (SELECT id FROM users UNION SELECT id FROM depts "
+            "ORDER BY id LIMIT 2 OFFSET 1) x ORDER BY id",
+        )
+        assert rows == [(2,), (3,)]
+
+    def test_limit_in_union_subquery_over_cte(self, conn):
+        # 集合演算は WITH 句を持てないので、切り離すときに派生表へ包み直す
+        rows = q(
+            conn,
+            "WITH t AS (SELECT id FROM users WHERE id <= 3) "
+            "SELECT id FROM (SELECT id FROM t UNION SELECT id FROM depts "
+            "ORDER BY id LIMIT 2 OFFSET 1) x ORDER BY id",
+        )
+        assert rows == [(2,), (3,)]
+
     def test_expression_no_table(self, conn):
         assert q(conn, "SELECT 1 + 1") == [(2,)]
 
@@ -206,41 +293,27 @@ class TestErrors:
         with pytest.raises(NotSupportedError, match="scalar subquer"):
             conn.execute("SELECT name, (SELECT MAX(id) FROM depts) FROM users")
 
-    def test_limit_in_in_subquery_clear_error(self, conn):
-        # LIMIT があると sqlglot が IN の unnest を諦め、executor が黙って空を返す
-        with pytest.raises(NotSupportedError, match="IN / EXISTS subquery"):
-            conn.execute("SELECT id FROM users WHERE id IN (SELECT id FROM depts LIMIT 1)")
-
     def test_limit_in_not_in_subquery_clear_error(self, conn):
-        with pytest.raises(NotSupportedError, match="IN / EXISTS subquery"):
+        # sqlglot は NOT IN の unnest を意図的に見送るため、実体化しても評価できない
+        with pytest.raises(NotSupportedError, match="NOT IN subquery"):
             conn.execute(
                 "SELECT id FROM users WHERE id NOT IN (SELECT id FROM depts LIMIT 1)"
             )
 
-    def test_limit_in_exists_subquery_clear_error(self, conn):
-        with pytest.raises(NotSupportedError, match="IN / EXISTS subquery"):
-            conn.execute("SELECT id FROM users WHERE EXISTS (SELECT 1 FROM depts LIMIT 1)")
+    def test_limit_in_correlated_subquery_clear_error(self, conn):
+        # 外側の行ごとに結果が変わるので、一度の評価では実体化できない
+        with pytest.raises(NotSupportedError, match="correlated subquery"):
+            conn.execute(
+                "SELECT id FROM users u "
+                "WHERE id IN (SELECT id FROM depts d WHERE d.id = u.dept_id LIMIT 1)"
+            )
 
-    def test_limit_nested_under_in_subquery_clear_error(self, conn):
-        # LIMIT を内側の派生表に押し込んでも unnest は諦められる
-        with pytest.raises(NotSupportedError, match="IN / EXISTS subquery"):
+    def test_limit_in_correlated_subquery_unqualified_clear_error(self, conn):
+        # 修飾子なしで外側を参照する形も qualify を通してから判定する
+        with pytest.raises(NotSupportedError, match="correlated subquery"):
             conn.execute(
                 "SELECT id FROM users "
-                "WHERE id IN (SELECT id FROM (SELECT id FROM depts LIMIT 1) z)"
-            )
-
-    def test_offset_in_from_subquery_clear_error(self, conn):
-        # OFFSET は planner が読まないため、トップレベル以外では黙って無視される
-        with pytest.raises(NotSupportedError, match="OFFSET is only supported"):
-            conn.execute(
-                "SELECT id FROM (SELECT id FROM users ORDER BY id LIMIT 2 OFFSET 1) x"
-            )
-
-    def test_offset_in_cte_clear_error(self, conn):
-        with pytest.raises(NotSupportedError, match="OFFSET is only supported"):
-            conn.execute(
-                "WITH t AS (SELECT id FROM users ORDER BY id LIMIT 2 OFFSET 1) "
-                "SELECT id FROM t"
+                "WHERE dept_id IN (SELECT id FROM depts WHERE id = dept_id LIMIT 1)"
             )
 
     def test_non_literal_limit_in_subquery_clear_error(self, conn):

@@ -196,7 +196,8 @@ Four tools are exposed: query (SELECT only), execute (DML / DDL), list_tables, a
 ## Limitations
 
 - Window functions, DISTINCT inside aggregates (e.g. `COUNT(DISTINCT x)`), scalar subqueries in the SELECT list, and `UPDATE ... FROM` are not supported (they fail with a clear error)
-- LIMIT / OFFSET inside an `IN` / `NOT IN` / `EXISTS` subquery, and OFFSET anywhere other than the top level of a query, are not supported (they fail with a clear error). LIMIT in a FROM-clause subquery, a CTE, or a scalar subquery works
+- A subquery with LIMIT / OFFSET is evaluated on its own before the outer query and replaced by its result, so LIMIT / OFFSET works in a FROM-clause subquery, a CTE, a scalar subquery, and an `IN` / `EXISTS` subquery. The evaluation is not short-circuited: the subquery is read in full even under `EXISTS`
+- LIMIT / OFFSET in a correlated subquery (one that references a column of the outer query) is not supported, because a single evaluation cannot determine its result. LIMIT / OFFSET inside a `NOT IN` subquery is not supported either; rewrite it as a LEFT JOIN with `IS NULL`. Both fail with a clear error
 - Tables are fully loaded into memory at query time; the intended scope is databases small enough for an LLM to read directly (tens of thousands of rows)
 - A connection keeps the tables it has read and reloads them when the inode, mtime, or size of the CSV or schema file changes. Writes from iceql always replace the file, so they are always picked up; on a filesystem with one-second mtime resolution, an external overwrite of the same size within the same second can be missed
 - FOREIGN KEY is not supported; a `REFERENCES` clause in CREATE TABLE fails with a clear error rather than being silently dropped
