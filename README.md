@@ -181,7 +181,7 @@ Four tools are exposed: query (SELECT only), execute (DML / DDL), list_tables, a
 
 ## Limitations
 
-- Window functions, DISTINCT inside aggregates (e.g. `COUNT(DISTINCT x)`), and scalar subqueries in the SELECT list are not supported (they fail with a clear error)
+- Window functions, DISTINCT inside aggregates (e.g. `COUNT(DISTINCT x)`), scalar subqueries in the SELECT list, and `UPDATE ... FROM` are not supported (they fail with a clear error)
 - Tables are fully loaded into memory at query time; the intended scope is databases small enough for an LLM to read directly (tens of thousands of rows)
 - Windows is not supported (inter-process locking uses fcntl)
 

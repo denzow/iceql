@@ -12,7 +12,7 @@ from sqlglot import exp
 from sqlglot.executor.table import Table
 
 from iceql.catalog import Catalog
-from iceql.engine import StatementResult, executor
+from iceql.engine import StatementResult, executor, node_arg
 from iceql.errors import IntegrityError, NotSupportedError, ProgrammingError
 from iceql.schema import TableSchema
 from iceql.storage import Row
@@ -154,7 +154,8 @@ def run_insert(catalog: Catalog, ast: exp.Insert) -> StatementResult:
 
 
 def run_update(catalog: Catalog, ast: exp.Update) -> StatementResult:
-    if ast.args.get("from"):
+    # FROM 句のキーは sqlglot のバージョンで from / from_ のどちらかになる
+    if node_arg(ast, "from", "from_"):
         raise NotSupportedError("UPDATE ... FROM is not supported")
     table = _table_name(ast.this)
     schema = catalog.load_schema(table)
@@ -174,7 +175,7 @@ def run_update(catalog: Catalog, ast: exp.Update) -> StatementResult:
         for i, (_, value_expr) in enumerate(set_items)
     ]
     select = exp.select(ROWID, *set_projections).from_(table)
-    where = ast.args.get("where")
+    where = node_arg(ast, "where")
     if where:
         select = select.where(where.this.copy())
     tables, annotations = _rowid_tables(catalog, select, table, schema, rows)
@@ -199,7 +200,7 @@ def run_delete(catalog: Catalog, ast: exp.Delete) -> StatementResult:
     rows = catalog.read_rows(table)
 
     select = exp.select(ROWID).from_(table)
-    where = ast.args.get("where")
+    where = node_arg(ast, "where")
     if where:
         select = select.where(where.this.copy())
     tables, annotations = _rowid_tables(catalog, select, table, schema, rows)

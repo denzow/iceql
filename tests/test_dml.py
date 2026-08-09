@@ -3,6 +3,7 @@ import pytest
 from iceql.errors import (
     DataError,
     IntegrityError,
+    NotSupportedError,
     ProgrammingError,
 )
 
@@ -200,6 +201,20 @@ class TestUpdate:
     def test_update_type_check(self, conn):
         with pytest.raises(DataError):
             conn.execute("UPDATE users SET age = 'abc' WHERE id = 1")
+
+    def test_update_from_is_rejected(self, conn):
+        # FROM 句を取りこぼすと WHERE ごと無視して全行を書き換えてしまう
+        with pytest.raises(NotSupportedError, match="FROM"):
+            conn.execute(
+                "UPDATE users SET name = depts.dept "
+                "FROM depts WHERE users.dept_id = depts.id"
+            )
+        assert all_rows(conn, "users")[0][1] == "alice"
+
+    def test_update_from_subquery_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="FROM"):
+            conn.execute("UPDATE users SET name = 'x' FROM (SELECT 1) s")
+        assert all_rows(conn, "users")[0][1] == "alice"
 
 
 class TestDelete:

@@ -194,7 +194,7 @@ $ iceql mcp mydb --read-only   # --read-only を外すと書き込み系ツー�
 
 ## 制限事項
 
-- ウィンドウ関数、集約内の DISTINCT（`COUNT(DISTINCT x)` など）、SELECT 句のスカラサブクエリは未対応（明確なエラーになる）
+- ウィンドウ関数、集約内の DISTINCT（`COUNT(DISTINCT x)` など）、SELECT 句のスカラサブクエリ、`UPDATE ... FROM` は未対応（明確なエラーになる）
 - テーブルは実行時に全件メモリに載る。想定スコープは「LLM がそのまま読めるサイズ」（数万行規模）のデータベースである
 - プロセス間ロックに fcntl を使うため、Windows は未対応
 

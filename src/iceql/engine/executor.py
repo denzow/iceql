@@ -27,7 +27,7 @@ from sqlglot.executor.table import Table
 from sqlglot.schema import normalize_name
 
 from iceql.catalog import Catalog
-from iceql.engine import SQL_DIALECT, StatementResult
+from iceql.engine import SQL_DIALECT, StatementResult, node_arg
 from iceql.errors import NotSupportedError, OperationalError, ProgrammingError
 from iceql.storage import Row
 from iceql.types import Value
@@ -127,22 +127,22 @@ def _extract_order_limit(
     """
     limit: int | None = None
     offset = 0
-    limit_node = ast.args.get("limit")
+    limit_node = node_arg(ast, "limit")
     if isinstance(limit_node, exp.Limit):
         limit = _int_literal(limit_node.expression, "LIMIT")
         ast.set("limit", None)
-    offset_node = ast.args.get("offset")
+    offset_node = node_arg(ast, "offset")
     if isinstance(offset_node, exp.Offset):
         offset = _int_literal(offset_node.expression, "OFFSET")
         ast.set("offset", None)
 
     keys: list[_OrderKey] = []
     hidden = 0
-    order_node = ast.args.get("order")
+    order_node = node_arg(ast, "order")
     if isinstance(order_node, exp.Order):
         is_select = isinstance(ast, exp.Select)
         projections = list(ast.expressions) if is_select else []
-        distinct = bool(ast.args.get("distinct")) if is_select else True
+        distinct = bool(node_arg(ast, "distinct")) if is_select else True
         # SELECT * があると AST 上の射影位置と結果の列位置が一致しないため、
         # その場合は列名で解決する(隠し列も名前で引く)
         has_star = any(
@@ -152,8 +152,8 @@ def _extract_order_limit(
         )
         for ordered in order_node.expressions:
             expr = ordered.this
-            desc = bool(ordered.args.get("desc"))
-            nulls_first = ordered.args.get("nulls_first")
+            desc = bool(node_arg(ordered, "desc"))
+            nulls_first = node_arg(ordered, "nulls_first")
             if nulls_first is None:
                 nulls_first = not desc  # SQLite の既定: NULL 最小
             index: int | str

@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlglot import exp
 
 from iceql.catalog import Catalog
-from iceql.engine import StatementResult
+from iceql.engine import StatementResult, node_arg
 from iceql.engine.dml import _eval_constant
 from iceql.errors import IntegrityError, NotSupportedError, ProgrammingError
 from iceql.schema import Column, TableSchema
@@ -42,19 +42,19 @@ def _build_column(coldef: exp.ColumnDef) -> Column:
     name = coldef.name
     if name == "_rowid_":
         raise ProgrammingError("column name '_rowid_' is reserved")
-    dtype = coldef.args.get("kind")
+    dtype = node_arg(coldef, "kind")
     if dtype is None:
         raise ProgrammingError(f"column {name!r} must declare a type")
     nullable = True
     primary_key = False
     default = None
     autoincrement = False
-    for constraint in coldef.args.get("constraints") or []:
+    for constraint in node_arg(coldef, "constraints") or []:
         kind = constraint.kind
         if isinstance(kind, exp.PrimaryKeyColumnConstraint):
             primary_key = True
         elif isinstance(kind, exp.NotNullColumnConstraint):
-            nullable = bool(kind.args.get("allow_null"))
+            nullable = bool(node_arg(kind, "allow_null"))
         elif isinstance(kind, exp.DefaultColumnConstraint):
             default = _eval_constant(kind.this)
         elif isinstance(kind, exp.AutoIncrementColumnConstraint):
@@ -116,14 +116,14 @@ def run_create(catalog: Catalog, ast: exp.Create) -> StatementResult:
             by_name[name].nullable = False
 
     schema = TableSchema(table=table, columns=columns)
-    catalog.create_table(schema, if_not_exists=bool(ast.args.get("exists")))
+    catalog.create_table(schema, if_not_exists=bool(node_arg(ast, "exists")))
     return StatementResult(rowcount=-1)
 
 
 def run_drop(catalog: Catalog, ast: exp.Drop) -> StatementResult:
     if ast.kind != "TABLE":
         raise NotSupportedError(f"DROP {ast.kind} is not supported")
-    catalog.drop_table(ast.this.name, if_exists=bool(ast.args.get("exists")))
+    catalog.drop_table(ast.this.name, if_exists=bool(node_arg(ast, "exists")))
     return StatementResult(rowcount=-1)
 
 
@@ -177,10 +177,10 @@ def _alter_rename_column(
 
 
 def run_alter(catalog: Catalog, ast: exp.Alter) -> StatementResult:
-    if ast.args.get("kind") != "TABLE":
+    if node_arg(ast, "kind") != "TABLE":
         raise NotSupportedError("only ALTER TABLE is supported")
     table = ast.this.name
-    for action in ast.args.get("actions") or []:
+    for action in node_arg(ast, "actions") or []:
         schema = catalog.load_schema(table)
         if isinstance(action, exp.ColumnDef):
             _alter_add_column(catalog, schema, action)
@@ -188,7 +188,7 @@ def run_alter(catalog: Catalog, ast: exp.Alter) -> StatementResult:
             _alter_drop_column(catalog, schema, action.this.name)
         elif isinstance(action, exp.RenameColumn):
             _alter_rename_column(
-                catalog, schema, action.this.name, action.args["to"].name
+                catalog, schema, action.this.name, node_arg(action, "to").name
             )
         elif isinstance(action, exp.AlterRename):
             catalog.rename_table(table, action.this.name)

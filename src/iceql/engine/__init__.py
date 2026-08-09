@@ -3,17 +3,40 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 import sqlglot
 from sqlglot import exp
 from sqlglot.errors import ParseError
 
 from iceql.catalog import Catalog
-from iceql.errors import NotSupportedError, ProgrammingError
+from iceql.errors import InternalError, NotSupportedError, ProgrammingError
 from iceql.storage import DatabaseLock
 from iceql.types import Value
 
 SQL_DIALECT = "sqlite"
+
+
+def node_arg(node: exp.Expression, *names: str) -> Any:
+    """sqlglot ノードの引数を、キー名を検証したうえで取り出す。
+
+    sqlglot は予約語と衝突する引数名の末尾にアンダースコアを付ける
+    (UPDATE の FROM 句は ``from_``)。綴りを外しても ``args.get`` は None を
+    返すだけなので、句を未対応として弾いているつもりが黙って無視される。
+    キー名はバージョンで変わりうるため、候補を複数受け取ったうえで、
+    どれもそのノードの arg_types に無ければ iceql 側の不整合として落とす。
+    """
+    known = [name for name in names if name in type(node).arg_types]
+    if not known:
+        raise InternalError(
+            f"{type(node).__name__} has no argument "
+            f"{' / '.join(repr(name) for name in names)} in this sqlglot version"
+        )
+    for name in known:
+        value = node.args.get(name)
+        if value is not None:
+            return value
+    return None
 
 
 @dataclass
