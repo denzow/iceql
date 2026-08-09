@@ -8,6 +8,9 @@ sqlglot.executor は次の制約があるため、ORDER BY / LIMIT / OFFSET は
 射影に無いソートキーは隠し列(__ord_N)として SELECT 句に追加して値を計算させ、
 結果から取り除く。NULL の位置は SQLite と同じ既定(NULL 最小)。
 
+取り外せるのはトップレベルだけなので、サブクエリに残る LIMIT / OFFSET は
+_check_nested_limits で検査する(誤答になる位置だけを拒否する)。
+
 テーブルは sqlglot.executor.table.Table として組み立てて渡す。行を dict の
 リストで渡すと、sqlglot が行ごと・列ごとに列名を正規化し直して別表現へ複製し、
 その分だけ時間とメモリを使う。組み立てと使い回しは iceql.tablecache が持つ。
@@ -94,6 +97,32 @@ def _int_literal(node: exp.Expression, clause: str) -> int:
     if isinstance(node, exp.Literal) and node.is_int:
         return int(node.name)
     raise NotSupportedError(f"{clause} must be an integer literal")
+
+
+def _check_nested_limits(ast: exp.Expression) -> None:
+    """トップレベルから取り外したあとに残る LIMIT / OFFSET を検査する。
+
+    sqlglot の optimizer は IN サブクエリを LEFT JOIN へ unnest するが、
+    サブツリーのどこかに LIMIT / OFFSET があると unnest を諦める。残った
+    IN / EXISTS を executor は評価できず、IN は空を、EXISTS はエラーを返す。
+    OFFSET は planner が読まないので、どの位置でも黙って無視される。
+    どちらも誤った結果になるので拒否する。
+    FROM 句サブクエリ / CTE / スカラサブクエリの LIMIT は planner が
+    step.limit として扱うため、そのまま通す。
+    """
+    for predicate in ast.find_all(exp.In, exp.Exists):
+        if predicate.find(exp.Limit, exp.Offset):
+            raise NotSupportedError(
+                "LIMIT / OFFSET inside an IN / EXISTS subquery is not supported; "
+                "rewrite it as a JOIN, e.g. "
+                "SELECT t.x FROM t JOIN (SELECT x FROM u ORDER BY x LIMIT 2) s "
+                "ON s.x = t.x"
+            )
+    if ast.find(exp.Offset):
+        raise NotSupportedError("OFFSET is only supported at the top level of a query")
+    for limit in ast.find_all(exp.Limit):
+        # 整数リテラルでない LIMIT は sqlglot の planner が ValueError で落ちる
+        _int_literal(limit.expression, "LIMIT")
 
 
 def _projection_index(projections: list[exp.Expression], expr: exp.Expression) -> int | None:
@@ -276,6 +305,7 @@ def evaluate(
 def run_select(catalog: Catalog, ast: exp.Expression) -> StatementResult:
     _precheck(ast)
     keys, hidden, limit, offset = _extract_order_limit(ast)
+    _check_nested_limits(ast)
     tables, schema = load_tables(catalog, physical_tables(ast, catalog))
     columns, rows = evaluate(ast, tables, schema)
     if keys:

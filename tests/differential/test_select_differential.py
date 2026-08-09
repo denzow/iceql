@@ -118,6 +118,14 @@ SELECT_QUERIES = [
     "SELECT name FROM users WHERE dept_id NOT IN (SELECT id FROM depts WHERE dept = 'hr') "
     "AND dept_id IS NOT NULL",
     "WITH grown AS (SELECT * FROM users WHERE age >= 30) SELECT name FROM grown",
+    "SELECT id FROM (SELECT id FROM users ORDER BY id LIMIT 2) x ORDER BY id",
+    "SELECT id, name FROM (SELECT id, name FROM users ORDER BY id DESC LIMIT 3) x "
+    "ORDER BY id",
+    "SELECT x.name, d.dept FROM (SELECT id, name, dept_id FROM users ORDER BY id LIMIT 3) x "
+    "JOIN depts d ON d.id = x.dept_id ORDER BY x.id",
+    "WITH top2 AS (SELECT id, name FROM users ORDER BY id DESC LIMIT 2) "
+    "SELECT id, name FROM top2 ORDER BY id",
+    "SELECT name FROM users WHERE id = (SELECT id FROM users ORDER BY id DESC LIMIT 1)",
     "SELECT name FROM users UNION ALL SELECT dept FROM depts",
     "SELECT dept_id FROM users WHERE dept_id IS NOT NULL UNION SELECT id FROM depts",
     "SELECT UPPER(name), LOWER(name), LENGTH(name) FROM users",

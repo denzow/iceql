@@ -35,6 +35,25 @@ class TestBasicSelect:
     def test_limit_offset(self, conn):
         assert q(conn, "SELECT id FROM users ORDER BY id LIMIT 2 OFFSET 1") == [(2,), (3,)]
 
+    def test_limit_in_from_subquery(self, conn):
+        rows = q(conn, "SELECT id FROM (SELECT id FROM users ORDER BY id LIMIT 2) x")
+        assert rows == [(1,), (2,)]
+
+    def test_limit_in_cte(self, conn):
+        rows = q(
+            conn,
+            "WITH top2 AS (SELECT id FROM users ORDER BY id DESC LIMIT 2) "
+            "SELECT id FROM top2 ORDER BY id",
+        )
+        assert rows == [(3,), (4,)]
+
+    def test_limit_in_scalar_subquery(self, conn):
+        rows = q(
+            conn,
+            "SELECT name FROM users WHERE id = (SELECT id FROM users ORDER BY id LIMIT 1)",
+        )
+        assert rows == [("alice",)]
+
     def test_expression_no_table(self, conn):
         assert q(conn, "SELECT 1 + 1") == [(2,)]
 
@@ -186,6 +205,48 @@ class TestErrors:
     def test_scalar_subquery_clear_error(self, conn):
         with pytest.raises(NotSupportedError, match="scalar subquer"):
             conn.execute("SELECT name, (SELECT MAX(id) FROM depts) FROM users")
+
+    def test_limit_in_in_subquery_clear_error(self, conn):
+        # LIMIT があると sqlglot が IN の unnest を諦め、executor が黙って空を返す
+        with pytest.raises(NotSupportedError, match="IN / EXISTS subquery"):
+            conn.execute("SELECT id FROM users WHERE id IN (SELECT id FROM depts LIMIT 1)")
+
+    def test_limit_in_not_in_subquery_clear_error(self, conn):
+        with pytest.raises(NotSupportedError, match="IN / EXISTS subquery"):
+            conn.execute(
+                "SELECT id FROM users WHERE id NOT IN (SELECT id FROM depts LIMIT 1)"
+            )
+
+    def test_limit_in_exists_subquery_clear_error(self, conn):
+        with pytest.raises(NotSupportedError, match="IN / EXISTS subquery"):
+            conn.execute("SELECT id FROM users WHERE EXISTS (SELECT 1 FROM depts LIMIT 1)")
+
+    def test_limit_nested_under_in_subquery_clear_error(self, conn):
+        # LIMIT を内側の派生表に押し込んでも unnest は諦められる
+        with pytest.raises(NotSupportedError, match="IN / EXISTS subquery"):
+            conn.execute(
+                "SELECT id FROM users "
+                "WHERE id IN (SELECT id FROM (SELECT id FROM depts LIMIT 1) z)"
+            )
+
+    def test_offset_in_from_subquery_clear_error(self, conn):
+        # OFFSET は planner が読まないため、トップレベル以外では黙って無視される
+        with pytest.raises(NotSupportedError, match="OFFSET is only supported"):
+            conn.execute(
+                "SELECT id FROM (SELECT id FROM users ORDER BY id LIMIT 2 OFFSET 1) x"
+            )
+
+    def test_offset_in_cte_clear_error(self, conn):
+        with pytest.raises(NotSupportedError, match="OFFSET is only supported"):
+            conn.execute(
+                "WITH t AS (SELECT id FROM users ORDER BY id LIMIT 2 OFFSET 1) "
+                "SELECT id FROM t"
+            )
+
+    def test_non_literal_limit_in_subquery_clear_error(self, conn):
+        # sqlglot の planner が ValueError で落ちるため、トップレベルと同じ扱いにする
+        with pytest.raises(NotSupportedError, match="LIMIT must be an integer literal"):
+            conn.execute("SELECT id FROM (SELECT id FROM users ORDER BY id LIMIT -1) x")
 
     def test_execute_error_wrapped(self, conn):
         with pytest.raises((OperationalError, ProgrammingError)):
