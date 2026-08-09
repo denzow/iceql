@@ -39,6 +39,31 @@ class TestTableSchema:
     def test_primary_key_property(self):
         assert make_schema().primary_key == ["id"]
 
+    def test_autoincrement_column_is_single_integer_pk(self):
+        column = make_schema().autoincrement_column
+        assert column is not None and column.name == "id"
+
+    def test_no_autoincrement_for_text_pk(self):
+        schema = TableSchema(
+            table="t",
+            columns=[Column(name="k", type="text", primary_key=True)],
+        )
+        assert schema.autoincrement_column is None
+
+    def test_no_autoincrement_for_composite_pk(self):
+        schema = TableSchema(
+            table="t",
+            columns=[
+                Column(name="a", type="integer", primary_key=True),
+                Column(name="b", type="integer", primary_key=True),
+            ],
+        )
+        assert schema.autoincrement_column is None
+
+    def test_no_autoincrement_without_pk(self):
+        schema = TableSchema(table="t", columns=[Column(name="a", type="integer")])
+        assert schema.autoincrement_column is None
+
 
 class TestValidateValues:
     def test_normalizes_values(self):
@@ -77,6 +102,15 @@ class TestBuildRow:
 
     def test_column_index(self):
         assert make_schema().column_index("bio") == 2
+
+    def test_arrange_row_skips_validation(self):
+        # 採番を挟めるよう、NOT NULL の主キーが NULL のままでも通る
+        assert make_schema().arrange_row(["name"], ["alice"]) == [
+            None,
+            "alice",
+            None,
+            True,
+        ]
 
 
 class TestYamlRoundtrip:

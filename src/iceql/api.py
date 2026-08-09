@@ -68,6 +68,9 @@ class Cursor:
         self.connection = connection
         self.description: list[tuple[Any, ...]] | None = None
         self.rowcount = -1
+        # 直前の INSERT が最後に入れた行の主キー値。単一の integer 主キーを持つ
+        # テーブルへの INSERT 以外では None(PEP 249 の任意属性)
+        self.lastrowid: int | None = None
         self._rows: list[tuple[Value, ...]] = []
         self._pos = 0
         self._closed = False
@@ -103,6 +106,7 @@ class Cursor:
                 (name, None, None, None, None, None, None) for name in result.columns
             ]
         self.rowcount = result.rowcount
+        self.lastrowid = result.lastrowid
         self._rows = result.rows
         self._pos = 0
 

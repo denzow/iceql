@@ -136,6 +136,23 @@ conn.close()
 SQL parsing and SELECT execution are powered by [sqlglot](https://github.com/tobymao/sqlglot).
 NULL ordering follows the SQLite default (NULL sorts smallest: first in ASC, last in DESC).
 
+## Primary key auto-assignment
+
+A table whose primary key is a single `integer` column assigns the value itself when an INSERT leaves it out or passes NULL.
+The assigned value is the largest existing value plus one, or `1` when the table is empty.
+`Cursor.lastrowid` holds the value given to the last inserted row (`None` for tables without such a primary key).
+
+```console
+$ iceql mydb -c "INSERT INTO users (name, age) VALUES ('dave', 41)"
+$ iceql mydb -c "SELECT * FROM users WHERE name = 'dave'"
+id,name,age
+4,dave,41
+```
+
+`AUTOINCREMENT` is accepted on such a column and means exactly the same thing (it is an error anywhere else, as in SQLite).
+It does not carry SQLite's guarantee that a value is never reused: deleting the row with the largest value makes that value available again.
+Never reusing a value would require a counter stored outside the CSV, and hand-editing the CSV would then leave the counter behind.
+
 ## Types
 
 | Type | CSV representation |

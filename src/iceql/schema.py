@@ -64,6 +64,18 @@ class TableSchema:
     def primary_key(self) -> list[str]:
         return [c.name for c in self.columns if c.primary_key]
 
+    @property
+    def autoincrement_column(self) -> Column | None:
+        """値が NULL のとき自動採番する列。単一の integer 主キーのときだけ存在する。
+
+        sqlite で INTEGER PRIMARY KEY が rowid の別名になる条件に合わせている。
+        複合主キーと integer 以外の主キーは対象外。
+        """
+        keys = [c for c in self.columns if c.primary_key]
+        if len(keys) == 1 and keys[0].type == "integer":
+            return keys[0]
+        return None
+
     def column(self, name: str) -> Column:
         for col in self.columns:
             if col.name == name:
@@ -98,10 +110,14 @@ class TableSchema:
             out.append(codec.decode(encoded))
         return tuple(out)
 
-    def build_row(
+    def arrange_row(
         self, columns: Sequence[str], values: Sequence[Value]
-    ) -> tuple[Value, ...]:
-        """列指定つきの値から、列順に並べた行を組む。指定の無い列は DEFAULT。"""
+    ) -> list[Value]:
+        """列指定つきの値を列順に並べる。指定の無い列は DEFAULT。検証はしない。
+
+        自動採番は検証(NOT NULL)より前に値を埋める必要があるため、
+        並べ替えと検証を分けている。
+        """
         row: list[Value] = [c.default for c in self.columns]
         assigned: set[int] = set()
         for name, value in zip(columns, values, strict=True):
@@ -110,7 +126,13 @@ class TableSchema:
                 raise DataError(f"column specified more than once: {self.table}.{name}")
             assigned.add(index)
             row[index] = value
-        return self.validate_values(row)
+        return row
+
+    def build_row(
+        self, columns: Sequence[str], values: Sequence[Value]
+    ) -> tuple[Value, ...]:
+        """列指定つきの値から、列順に並べた行を組む。指定の無い列は DEFAULT。"""
+        return self.validate_values(self.arrange_row(columns, values))
 
 
 def _column_to_yaml(col: Column) -> dict[str, Any]:

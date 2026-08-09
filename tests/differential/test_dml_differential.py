@@ -27,6 +27,23 @@ DML_CASES = [
         "UPDATE t SET score = 5.0 WHERE id = 10",
         "DELETE FROM t WHERE id <= 2",
     ],
+    # INTEGER PRIMARY KEY の自動採番(sqlite の rowid 別名と同じ規則)
+    ["INSERT INTO t (name) VALUES ('e')"],
+    ["INSERT INTO t (name) VALUES ('e'), ('f'), ('g')"],
+    ["INSERT INTO t VALUES (NULL, 'e', NULL, NULL)"],
+    [
+        "INSERT INTO t (id, name) VALUES (100, 'e')",
+        "INSERT INTO t (name) VALUES ('f')",
+    ],
+    ["INSERT INTO t VALUES (7, 'e', NULL, NULL), (NULL, 'f', NULL, NULL)"],
+    [
+        "DELETE FROM t",
+        "INSERT INTO t (name) VALUES ('e')",
+    ],
+    [
+        "DELETE FROM t WHERE id = 4",
+        "INSERT INTO t (name) VALUES ('e')",
+    ],
 ]
 
 

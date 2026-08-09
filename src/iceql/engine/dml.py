@@ -58,6 +58,16 @@ def _check_primary_key(schema: TableSchema, rows: list[Row]) -> None:
         seen.add(key)
 
 
+def _next_autoincrement(rows: list[Row], index: int) -> int:
+    """自動採番の次の値。既存の最大値 + 1、行が無ければ 1。
+
+    テーブルは既にメモリ上にあるので、最大値の算出に追加の読み込みは要らない。
+    削除された値は再利用される(採番済みの値を CSV の外に覚えないため)。
+    """
+    used = [value for value in (row[index] for row in rows) if isinstance(value, int)]
+    return max(used) + 1 if used else 1
+
+
 def _table_name(node: exp.Expression) -> str:
     if isinstance(node, exp.Schema):
         node = node.this
@@ -116,15 +126,31 @@ def run_insert(catalog: Catalog, ast: exp.Insert) -> StatementResult:
         raise NotSupportedError(f"unsupported INSERT source: {type(source).__name__}")
 
     rows = catalog.read_rows(table)
+    auto = schema.autoincrement_column
+    auto_index = schema.column_index(auto.name) if auto is not None else None
+    next_id = 0 if auto_index is None else _next_autoincrement(rows, auto_index)
+    last_id: int | None = None
+
     for values in new_values:
         if len(values) != len(columns):
             raise ProgrammingError(
                 f"INSERT has {len(values)} values for {len(columns)} columns"
             )
-        rows.append(schema.build_row(columns, values))
+        row = schema.arrange_row(columns, values)
+        # 列指定からの省略と明示的な NULL は、どちらもここで NULL になっている
+        if auto_index is not None and row[auto_index] is None:
+            row[auto_index] = next_id
+        validated = schema.validate_values(row)
+        if auto_index is not None:
+            assigned = validated[auto_index]
+            assert isinstance(assigned, int)
+            # 同じ文の中で明示された大きい値も、次の採番に反映する
+            next_id = max(next_id, assigned + 1)
+            last_id = assigned
+        rows.append(validated)
     _check_primary_key(schema, rows)
     catalog.write_rows(table, rows, schema)
-    return StatementResult(rowcount=len(new_values))
+    return StatementResult(rowcount=len(new_values), lastrowid=last_id)
 
 
 def run_update(catalog: Catalog, ast: exp.Update) -> StatementResult:

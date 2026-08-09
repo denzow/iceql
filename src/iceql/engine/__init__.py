@@ -23,6 +23,7 @@ class StatementResult:
     columns: list[str] | None = None
     rows: list[tuple[Value, ...]] = field(default_factory=list)
     rowcount: int = -1
+    lastrowid: int | None = None
 
 
 def parse_statement(sql: str) -> exp.Expression:

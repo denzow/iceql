@@ -149,6 +149,23 @@ conn.close()
 SQL のパースと SELECT の実行には [sqlglot](https://github.com/tobymao/sqlglot) を使っている。
 NULL の順序は SQLite と同じ既定（NULL 最小：ASC で先頭、DESC で末尾）に揃えている。
 
+## 主キーの自動採番
+
+主キーが単一の `integer` 列であるテーブルは、INSERT でその値を省略するか NULL を渡すと自分で採番する。
+入る値は既存の最大値 + 1 で、行が無ければ `1` である。
+採番された値は `Cursor.lastrowid` から読める（この形の主キーを持たないテーブルでは `None`）。
+
+```console
+$ iceql mydb -c "INSERT INTO users (name, age) VALUES ('dave', 41)"
+$ iceql mydb -c "SELECT * FROM users WHERE name = 'dave'"
+id,name,age
+4,dave,41
+```
+
+`AUTOINCREMENT` を付けても意味は同じである（SQLite と同様、それ以外の列に付けるとエラーになる）。
+ただし SQLite の `AUTOINCREMENT` が持つ「一度使った値を二度と使わない」保証はなく、最大値の行を削除すればその値は再び採番される。
+再利用しないためには採番済みの値を CSV の外に覚える必要があり、CSV を手で書き換えたときにその記録だけが取り残される。
+
 ## 型
 
 | 型 | CSV 上の表現 |

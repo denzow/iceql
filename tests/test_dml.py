@@ -102,6 +102,65 @@ class TestInsert:
         assert row == (date.today().isoformat(),)
 
 
+class TestAutoIncrement:
+    def test_omitted_pk_is_assigned(self, conn):
+        conn.execute("INSERT INTO depts (dept) VALUES ('hr')")
+        assert (3, "hr") in all_rows(conn, "depts")
+
+    def test_assigns_one_to_empty_table(self, conn):
+        conn.execute("DELETE FROM depts")
+        conn.execute("INSERT INTO depts (dept) VALUES ('hr')")
+        assert all_rows(conn, "depts") == [(1, "hr")]
+
+    def test_successive_values_in_one_statement(self, conn):
+        conn.execute("INSERT INTO depts (dept) VALUES ('hr'), ('legal')")
+        assert all_rows(conn, "depts")[-2:] == [(3, "hr"), (4, "legal")]
+
+    def test_explicit_null_is_assigned(self, conn):
+        conn.execute("INSERT INTO depts VALUES (NULL, 'hr')")
+        assert (3, "hr") in all_rows(conn, "depts")
+
+    def test_explicit_value_advances_the_counter(self, conn):
+        conn.execute("INSERT INTO depts (id, dept) VALUES (100, 'hr')")
+        conn.execute("INSERT INTO depts (dept) VALUES ('legal')")
+        assert all_rows(conn, "depts")[-1] == (101, "legal")
+
+    def test_explicit_value_advances_within_one_statement(self, conn):
+        conn.execute("INSERT INTO depts VALUES (5, 'a'), (NULL, 'b')")
+        assert all_rows(conn, "depts")[-1] == (6, "b")
+
+    def test_reuses_deleted_values(self, conn):
+        conn.execute("INSERT INTO depts (dept) VALUES ('hr')")
+        conn.execute("DELETE FROM depts WHERE id = 3")
+        conn.execute("INSERT INTO depts (dept) VALUES ('legal')")
+        assert (3, "legal") in all_rows(conn, "depts")
+
+    def test_insert_select_is_assigned(self, conn):
+        conn.execute("INSERT INTO depts (dept) SELECT name FROM users WHERE age >= 30")
+        assert all_rows(conn, "depts")[-2:] == [(3, "alice"), (4, "dave")]
+
+    def test_sees_rows_added_in_the_same_transaction(self, conn):
+        conn.execute("BEGIN")
+        conn.execute("INSERT INTO depts (dept) VALUES ('hr')")
+        conn.execute("INSERT INTO depts (dept) VALUES ('legal')")
+        conn.execute("COMMIT")
+        assert all_rows(conn, "depts")[-2:] == [(3, "hr"), (4, "legal")]
+
+    def test_composite_pk_is_not_assigned(self, conn):
+        conn.execute("CREATE TABLE pairs (a INTEGER, b INTEGER, PRIMARY KEY (a, b))")
+        with pytest.raises(IntegrityError, match="NOT NULL"):
+            conn.execute("INSERT INTO pairs (b) VALUES (1)")
+
+    def test_text_pk_is_not_assigned(self, conn):
+        conn.execute("CREATE TABLE tags (k TEXT PRIMARY KEY, v TEXT)")
+        with pytest.raises(IntegrityError, match="NOT NULL"):
+            conn.execute("INSERT INTO tags (v) VALUES ('x')")
+
+    def test_other_not_null_columns_still_fail(self, conn):
+        with pytest.raises(IntegrityError, match="NOT NULL"):
+            conn.execute("INSERT INTO depts (id) VALUES (3)")
+
+
 class TestUpdate:
     def test_update_where(self, conn):
         cur = conn.execute("UPDATE users SET age = 31 WHERE name = 'alice'")

@@ -48,6 +48,7 @@ def _build_column(coldef: exp.ColumnDef) -> Column:
     nullable = True
     primary_key = False
     default = None
+    autoincrement = False
     for constraint in coldef.args.get("constraints") or []:
         kind = constraint.kind
         if isinstance(kind, exp.PrimaryKeyColumnConstraint):
@@ -56,6 +57,10 @@ def _build_column(coldef: exp.ColumnDef) -> Column:
             nullable = bool(kind.args.get("allow_null"))
         elif isinstance(kind, exp.DefaultColumnConstraint):
             default = _eval_constant(kind.this)
+        elif isinstance(kind, exp.AutoIncrementColumnConstraint):
+            # INTEGER PRIMARY KEY は AUTOINCREMENT の有無によらず採番するので、
+            # キーワードは受理するだけで何も記録しない(README に差分を明記)
+            autoincrement = True
         else:
             raise NotSupportedError(
                 f"unsupported column constraint on {name!r}: "
@@ -68,6 +73,10 @@ def _build_column(coldef: exp.ColumnDef) -> Column:
         primary_key=primary_key,
         default=default,
     )
+    if autoincrement and not (column.primary_key and column.type == "integer"):
+        raise ProgrammingError(
+            f"AUTOINCREMENT is only allowed on an INTEGER PRIMARY KEY: {name!r}"
+        )
     if default is not None:
         # DEFAULT 値が型に合うか検証しておく
         codec_input = column.default

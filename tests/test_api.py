@@ -52,6 +52,25 @@ class TestCursor:
         cur = conn.execute("SELECT id FROM depts ORDER BY id")
         assert [row for row in cur] == [(1,), (2,)]
 
+    def test_lastrowid_after_insert(self, conn):
+        cur = conn.execute("INSERT INTO depts (dept) VALUES ('hr'), ('legal')")
+        assert cur.lastrowid == 4
+
+    def test_lastrowid_with_explicit_value(self, conn):
+        cur = conn.execute("INSERT INTO depts (id, dept) VALUES (7, 'hr')")
+        assert cur.lastrowid == 7
+
+    def test_lastrowid_is_none_without_integer_pk(self, conn):
+        conn.execute("CREATE TABLE tags (k TEXT PRIMARY KEY, v TEXT)")
+        cur = conn.execute("INSERT INTO tags VALUES ('a', 'x')")
+        assert cur.lastrowid is None
+
+    def test_lastrowid_is_none_for_other_statements(self, conn):
+        cur = conn.cursor()
+        cur.execute("INSERT INTO depts (dept) VALUES ('hr')")
+        cur.execute("SELECT * FROM depts")
+        assert cur.lastrowid is None
+
     def test_closed_cursor(self, conn):
         cur = conn.cursor()
         cur.close()

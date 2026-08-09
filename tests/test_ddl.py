@@ -67,6 +67,28 @@ class TestCreate:
         with pytest.raises(ProgrammingError, match="reserved"):
             db.execute("CREATE TABLE t (_rowid_ INTEGER)")
 
+    def test_autoincrement_accepted(self, db):
+        db.execute("CREATE TABLE u (id INTEGER PRIMARY KEY AUTOINCREMENT, n TEXT)")
+        db.execute("INSERT INTO u (n) VALUES ('a'), ('b')")
+        assert db.execute("SELECT * FROM u ORDER BY id").fetchall() == [
+            (1, "a"),
+            (2, "b"),
+        ]
+
+    def test_autoincrement_is_not_stored_in_the_schema(self, db):
+        # 採番の有無は「単一の integer 主キーか」で決まるので、記録する必要がない
+        db.execute("CREATE TABLE u (id INTEGER PRIMARY KEY AUTOINCREMENT, n TEXT)")
+        text = (db._catalog.root / "u.schema.yaml").read_text(encoding="utf-8")
+        assert "autoincrement" not in text
+
+    def test_autoincrement_on_text_pk_rejected(self, db):
+        with pytest.raises(ProgrammingError, match="AUTOINCREMENT"):
+            db.execute("CREATE TABLE u (id TEXT PRIMARY KEY AUTOINCREMENT)")
+
+    def test_autoincrement_without_pk_rejected(self, db):
+        with pytest.raises(ProgrammingError, match="AUTOINCREMENT"):
+            db.execute("CREATE TABLE u (id INTEGER AUTOINCREMENT, n TEXT)")
+
 
 class TestDrop:
     def test_drop(self, db):
