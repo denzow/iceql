@@ -1,7 +1,12 @@
 import pytest
 
 import iceql
-from iceql.errors import IntegrityError, NotSupportedError, ProgrammingError
+from iceql.errors import (
+    DataError,
+    IntegrityError,
+    NotSupportedError,
+    ProgrammingError,
+)
 
 
 @pytest.fixture
@@ -144,6 +149,166 @@ class TestAlter:
         db.execute("ALTER TABLE t ADD COLUMN score REAL DEFAULT 2.0")
         text = (db._catalog.root / "t.csv").read_text(encoding="utf-8")
         assert text == "id,name,score\n1,a,2.0\n2,b,2.0\n"
+
+
+class TestUniqueAndCheck:
+    def test_column_unique(self, db):
+        db.execute("CREATE TABLE u (id INTEGER PRIMARY KEY, e TEXT UNIQUE)")
+        db.execute("INSERT INTO u VALUES (1, 'a')")
+        with pytest.raises(IntegrityError, match=r"UNIQUE constraint failed: u\.e"):
+            db.execute("INSERT INTO u VALUES (2, 'a')")
+
+    def test_table_unique(self, db):
+        db.execute("CREATE TABLE u (a INTEGER, b INTEGER, UNIQUE (a, b))")
+        db.execute("INSERT INTO u VALUES (1, 1), (1, 2)")
+        with pytest.raises(IntegrityError, match=r"u\.a, u\.b"):
+            db.execute("INSERT INTO u VALUES (1, 2)")
+
+    def test_unique_ignores_null_keys(self, db):
+        # sqlite と同じで、NULL どうしは重複とみなさない
+        db.execute("CREATE TABLE u (a INTEGER, b INTEGER, UNIQUE (a, b))")
+        db.execute("INSERT INTO u VALUES (NULL, NULL), (NULL, NULL), (1, NULL), (1, NULL)")
+        assert db.execute("SELECT COUNT(*) FROM u").fetchone() == (4,)
+
+    def test_column_check(self, db):
+        db.execute("CREATE TABLE u (id INTEGER PRIMARY KEY, n INTEGER CHECK (n > 0))")
+        db.execute("INSERT INTO u VALUES (1, 5)")
+        with pytest.raises(IntegrityError, match=r"CHECK constraint failed: n > 0"):
+            db.execute("INSERT INTO u VALUES (2, 0)")
+
+    def test_check_passes_null(self, db):
+        db.execute("CREATE TABLE u (id INTEGER PRIMARY KEY, n INTEGER CHECK (n > 0))")
+        db.execute("INSERT INTO u VALUES (1, NULL)")
+        assert db.execute("SELECT n FROM u").fetchall() == [(None,)]
+
+    def test_table_check_over_two_columns(self, db):
+        db.execute("CREATE TABLE u (lo INTEGER, hi INTEGER, CHECK (lo <= hi))")
+        db.execute("INSERT INTO u VALUES (1, 2)")
+        with pytest.raises(IntegrityError, match="CHECK"):
+            db.execute("INSERT INTO u VALUES (3, 2)")
+
+    def test_named_constraints_are_reported_by_name(self, db):
+        db.execute(
+            "CREATE TABLE u (id INTEGER PRIMARY KEY, n INTEGER, "
+            "CONSTRAINT ck_positive CHECK (n > 0))"
+        )
+        with pytest.raises(IntegrityError, match="ck_positive"):
+            db.execute("INSERT INTO u VALUES (1, -1)")
+
+    def test_constraints_are_stored_in_the_schema(self, db):
+        db.execute(
+            "CREATE TABLE u (id INTEGER PRIMARY KEY, e TEXT UNIQUE, n INTEGER, "
+            "CONSTRAINT ck CHECK (n > 0))"
+        )
+        schema = db._catalog.load_schema("u")
+        assert [u.columns for u in schema.unique] == [["e"]]
+        assert [(c.name, c.expr) for c in schema.checks] == [("ck", "n > 0")]
+
+    def test_constraints_survive_reconnect(self, db, tmp_path):
+        db.execute("CREATE TABLE u (id INTEGER PRIMARY KEY, n INTEGER CHECK (n > 0))")
+        db.close()
+        again = iceql.connect(tmp_path / "db")
+        with pytest.raises(IntegrityError, match="CHECK"):
+            again.execute("INSERT INTO u VALUES (1, -1)")
+        again.close()
+
+    def test_update_is_checked(self, db):
+        db.execute(
+            "CREATE TABLE u (id INTEGER PRIMARY KEY, e TEXT UNIQUE, n INTEGER CHECK (n > 0))"
+        )
+        db.execute("INSERT INTO u VALUES (1, 'a', 1), (2, 'b', 2)")
+        with pytest.raises(IntegrityError, match="UNIQUE"):
+            db.execute("UPDATE u SET e = 'a' WHERE id = 2")
+        with pytest.raises(IntegrityError, match="CHECK"):
+            db.execute("UPDATE u SET n = 0 WHERE id = 2")
+        assert db.execute("SELECT e, n FROM u WHERE id = 2").fetchone() == ("b", 2)
+
+    def test_update_of_other_rows_ignores_existing_violations(self, db, tmp_path):
+        # 手編集で違反した行があっても、無関係な UPDATE は通す(sqlite と同じ)
+        db.execute("CREATE TABLE u (id INTEGER PRIMARY KEY, n INTEGER CHECK (n > 0))")
+        db.execute("INSERT INTO u VALUES (1, 1), (2, 2)")
+        (tmp_path / "db" / "u.csv").write_text("id,n\n1,-1\n2,2\n", encoding="utf-8")
+        db.execute("UPDATE u SET n = 5 WHERE id = 2")
+        assert db.execute("SELECT n FROM u ORDER BY id").fetchall() == [(-1,), (5,)]
+
+    def test_check_cannot_reference_another_table(self, db):
+        db.execute("CREATE TABLE other (id INTEGER PRIMARY KEY)")
+        with pytest.raises(NotSupportedError, match="another table"):
+            db.execute("CREATE TABLE u (n INTEGER CHECK (other.id > 0))")
+
+    def test_check_rejects_unknown_column(self, db):
+        with pytest.raises(DataError, match="no such column"):
+            db.execute("CREATE TABLE u (n INTEGER CHECK (m > 0))")
+
+    def test_check_rejects_subquery(self, db):
+        with pytest.raises(NotSupportedError, match="subquer"):
+            db.execute("CREATE TABLE u (n INTEGER CHECK (n IN (SELECT 1)))")
+
+    def test_check_rejects_aggregate(self, db):
+        with pytest.raises(NotSupportedError, match="aggregate"):
+            db.execute("CREATE TABLE u (n INTEGER CHECK (COUNT(n) > 0))")
+
+    def test_foreign_key_is_rejected_with_a_clear_error(self, db):
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        with pytest.raises(NotSupportedError, match="FOREIGN KEY"):
+            db.execute("CREATE TABLE u (t_id INTEGER REFERENCES t(id))")
+        with pytest.raises(NotSupportedError, match="FOREIGN KEY"):
+            db.execute("CREATE TABLE u (t_id INTEGER, FOREIGN KEY (t_id) REFERENCES t(id))")
+
+    def test_add_column_with_check(self, db):
+        db.execute("CREATE TABLE u (id INTEGER PRIMARY KEY)")
+        db.execute("INSERT INTO u VALUES (1)")
+        db.execute("ALTER TABLE u ADD COLUMN n INTEGER CHECK (n > 0)")
+        with pytest.raises(IntegrityError, match="CHECK"):
+            db.execute("UPDATE u SET n = -1 WHERE id = 1")
+
+    def test_add_column_with_check_rejects_violating_default(self, db):
+        db.execute("CREATE TABLE u (id INTEGER PRIMARY KEY)")
+        db.execute("INSERT INTO u VALUES (1)")
+        with pytest.raises(IntegrityError, match="CHECK"):
+            db.execute("ALTER TABLE u ADD COLUMN n INTEGER DEFAULT 0 CHECK (n > 0)")
+
+    def test_add_unique_column_rejected(self, db):
+        db.execute("CREATE TABLE u (id INTEGER PRIMARY KEY)")
+        with pytest.raises(NotSupportedError, match="UNIQUE"):
+            db.execute("ALTER TABLE u ADD COLUMN e TEXT UNIQUE")
+
+    def test_drop_column_used_by_a_constraint_rejected(self, db):
+        db.execute(
+            "CREATE TABLE u (id INTEGER PRIMARY KEY, e TEXT UNIQUE, n INTEGER CHECK (n > 0))"
+        )
+        with pytest.raises(ProgrammingError, match="used by constraint"):
+            db.execute("ALTER TABLE u DROP COLUMN e")
+        with pytest.raises(ProgrammingError, match="used by constraint"):
+            db.execute("ALTER TABLE u DROP COLUMN n")
+
+    def test_rename_column_follows_constraints(self, db):
+        db.execute(
+            "CREATE TABLE u (id INTEGER PRIMARY KEY, e TEXT UNIQUE, n INTEGER CHECK (n > 0))"
+        )
+        db.execute("ALTER TABLE u RENAME COLUMN e TO mail")
+        db.execute("ALTER TABLE u RENAME COLUMN n TO num")
+        schema = db._catalog.load_schema("u")
+        assert [u.columns for u in schema.unique] == [["mail"]]
+        assert [c.expr for c in schema.checks] == ["num > 0"]
+        db.execute("INSERT INTO u VALUES (1, 'a', 1)")
+        with pytest.raises(IntegrityError, match=r"u\.mail"):
+            db.execute("INSERT INTO u VALUES (2, 'a', 1)")
+        with pytest.raises(IntegrityError, match="CHECK"):
+            db.execute("INSERT INTO u VALUES (3, 'b', 0)")
+
+    def test_rename_table_keeps_constraints(self, db):
+        db.execute("CREATE TABLE u (id INTEGER PRIMARY KEY, n INTEGER CHECK (n > 0))")
+        db.execute("ALTER TABLE u RENAME TO v")
+        with pytest.raises(IntegrityError, match="CHECK"):
+            db.execute("INSERT INTO v VALUES (1, -1)")
+
+    def test_qualified_check_survives_a_table_rename(self, db):
+        db.execute("CREATE TABLE u (id INTEGER PRIMARY KEY, n INTEGER CHECK (u.n > 0))")
+        assert db._catalog.load_schema("u").checks[0].expr == "n > 0"
+        db.execute("ALTER TABLE u RENAME TO v")
+        with pytest.raises(IntegrityError, match="CHECK"):
+            db.execute("INSERT INTO v VALUES (1, -1)")
 
 
 class TestEndToEnd:

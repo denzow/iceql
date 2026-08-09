@@ -84,7 +84,7 @@ Meta commands: `\d [table]` (list / describe tables), `\x` (toggle expanded outp
 `-f table|csv|json` selects the output format (defaults to table on a TTY, csv when piped).
 With `-f csv`, NULL is written as `\N`, the same convention as the stored CSV files. `--null-marker` changes that for tools that expect something else: `iceql mydb -c "SELECT * FROM users" -f csv --null-marker '' > users.csv`. An empty marker makes a NULL and an empty string look the same in the output; the distinction is gone and cannot be recovered by reading the file back.
 
-`iceql check mydb` validates schema/CSV consistency (types, NOT NULL, duplicate primary keys, canonical form) and exits non-zero on errors.
+`iceql check mydb` validates schema/CSV consistency (types, NOT NULL, duplicate primary keys, UNIQUE, CHECK, canonical form) and exits non-zero on errors.
 This makes hand-edited CSV files verifiable in CI or a pre-commit hook.
 
 ## Importing CSV
@@ -141,6 +141,7 @@ For anything `executemany` does not cover (mixed statements, UPDATE against many
 - SELECT: WHERE, JOIN (INNER / LEFT), GROUP BY, aggregate functions, HAVING, ORDER BY (with NULLS FIRST / LAST), LIMIT / OFFSET, DISTINCT, IN subqueries, CTE (WITH), UNION / UNION ALL
 - DML: INSERT (VALUES / SELECT), UPDATE, DELETE
 - DDL: CREATE TABLE, DROP TABLE, ALTER TABLE (ADD / DROP / RENAME COLUMN, RENAME TO)
+- Constraints: PRIMARY KEY, NOT NULL, DEFAULT, UNIQUE, CHECK. UNIQUE and CHECK are recorded in the schema YAML and enforced on INSERT / UPDATE; `iceql check` applies the same two checks to hand-edited CSV. NULL follows SQLite: keys containing a NULL never collide, and a CHECK that evaluates to NULL passes
 - Transactions: BEGIN / COMMIT / ROLLBACK (changes are staged in memory and flushed on COMMIT). DDL is allowed inside a transaction, so a schema change and the data migration that goes with it commit as one unit. Writers are serialized: BEGIN takes a database-wide write lock held until COMMIT / ROLLBACK, and other writers wait for it (up to `connect(timeout=...)` seconds, then `OperationalError`). SELECTs are never blocked by an open transaction — they only wait during the brief COMMIT flush. COMMITs are crash-safe: staged changes are first written to a redo journal, and an interrupted COMMIT is completed automatically the next time the database is opened
 - Placeholders: `?` (qmark) and `:name` (named)
 
@@ -195,6 +196,7 @@ Four tools are exposed: query (SELECT only), execute (DML / DDL), list_tables, a
 - Window functions, DISTINCT inside aggregates (e.g. `COUNT(DISTINCT x)`), scalar subqueries in the SELECT list, and `UPDATE ... FROM` are not supported (they fail with a clear error)
 - Tables are fully loaded into memory at query time; the intended scope is databases small enough for an LLM to read directly (tens of thousands of rows)
 - A connection keeps the tables it has read and reloads them when the inode, mtime, or size of the CSV or schema file changes. Writes from iceql always replace the file, so they are always picked up; on a filesystem with one-second mtime resolution, an external overwrite of the same size within the same second can be missed
+- FOREIGN KEY is not supported; a `REFERENCES` clause in CREATE TABLE fails with a clear error rather than being silently dropped
 - Windows is not supported (inter-process locking uses fcntl)
 
 ## Development

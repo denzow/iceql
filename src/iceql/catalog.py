@@ -101,7 +101,7 @@ class Catalog:
         if self.has_table(new):
             raise ProgrammingError(f"table already exists: {new}")
         rows = storage.read_rows(self.csv_path(old), schema)
-        renamed = TableSchema(table=new, columns=schema.columns)
+        renamed = schema.renamed(new)
         self.create_table(renamed)
         self.write_rows(new, rows, renamed)
         self.drop_table(old)

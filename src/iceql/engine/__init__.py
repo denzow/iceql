@@ -11,10 +11,11 @@ from sqlglot.errors import ParseError
 
 from iceql.catalog import Catalog
 from iceql.errors import InternalError, NotSupportedError, ProgrammingError
+from iceql.sql import SQL_DIALECT
 from iceql.storage import DatabaseLock
 from iceql.types import Value
 
-SQL_DIALECT = "sqlite"
+__all__ = ["SQL_DIALECT", "StatementResult", "execute_statement", "node_arg", "parse_statement"]
 
 
 def node_arg(node: exp.Expression, *names: str) -> Any:

@@ -104,7 +104,7 @@ class StagedCatalog(Catalog):
         if self.has_table(new):
             raise ProgrammingError(f"table already exists: {new}")
         rows = self.read_rows(old)
-        self._staged[new] = (TableSchema(table=new, columns=schema.columns), rows)
+        self._staged[new] = (schema.renamed(new), rows)
         self._staged[old] = DROPPED
 
     def flush(self, lock: DatabaseLock) -> None:

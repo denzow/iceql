@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from sqlglot import exp
 
 from iceql.catalog import Catalog
-from iceql.engine import StatementResult, node_arg
-from iceql.engine.dml import _eval_constant
+from iceql.engine import SQL_DIALECT, StatementResult, node_arg
+from iceql.engine.dml import _eval_constant, check_expressions
 from iceql.errors import IntegrityError, NotSupportedError, ProgrammingError
-from iceql.schema import Column, TableSchema
+from iceql.schema import CheckConstraint, Column, TableSchema, UniqueConstraint
 
 _DTYPE_MAP = {
     exp.DataType.Type.TINYINT: "integer",
@@ -38,7 +40,25 @@ def _map_type(dtype: exp.DataType, column: str) -> str:
     return mapped
 
 
-def _build_column(coldef: exp.ColumnDef) -> Column:
+@dataclass
+class _TableConstraints:
+    """表レベルに正規化した制約。列に書かれた UNIQUE / CHECK もここへ集める。
+
+    列レベルの CHECK は対象列が式から一意に決まらないので、表レベルと
+    区別せずに持つ。
+    """
+
+    unique: list[UniqueConstraint] = field(default_factory=list)
+    checks: list[CheckConstraint] = field(default_factory=list)
+
+
+def _constraint_name(node: exp.Expression) -> str | None:
+    """CONSTRAINT 句で付いた名前。無名なら None。"""
+    name = node.args.get("this")
+    return name.name if isinstance(name, exp.Identifier) else None
+
+
+def _build_column(coldef: exp.ColumnDef, constraints: _TableConstraints) -> Column:
     name = coldef.name
     if name == "_rowid_":
         raise ProgrammingError("column name '_rowid_' is reserved")
@@ -61,6 +81,21 @@ def _build_column(coldef: exp.ColumnDef) -> Column:
             # INTEGER PRIMARY KEY は AUTOINCREMENT の有無によらず採番するので、
             # キーワードは受理するだけで何も記録しない(README に差分を明記)
             autoincrement = True
+        elif isinstance(kind, exp.UniqueColumnConstraint):
+            constraints.unique.append(
+                UniqueConstraint(columns=[name], name=_constraint_name(constraint))
+            )
+        elif isinstance(kind, exp.CheckColumnConstraint):
+            constraints.checks.append(
+                CheckConstraint(
+                    expr=kind.this.sql(dialect=SQL_DIALECT),
+                    name=_constraint_name(constraint),
+                )
+            )
+        elif isinstance(kind, exp.Reference):
+            raise NotSupportedError(
+                f"FOREIGN KEY is not supported: {constraint.sql(dialect=SQL_DIALECT)}"
+            )
         else:
             raise NotSupportedError(
                 f"unsupported column constraint on {name!r}: "
@@ -86,6 +121,41 @@ def _build_column(coldef: exp.ColumnDef) -> Column:
     return column
 
 
+def _add_table_constraint(
+    item: exp.Expression, constraints: _TableConstraints, name: str | None = None
+) -> None:
+    """表レベルの制約を読み取って _TableConstraints へ足す。"""
+    if isinstance(item, exp.Constraint):
+        # CONSTRAINT <名前> <制約> は名前つきの入れ物として現れる
+        for inner in item.expressions:
+            _add_table_constraint(inner, constraints, item.this.name)
+        return
+    if isinstance(item, exp.UniqueColumnConstraint):
+        target = item.this
+        if not isinstance(target, exp.Schema):
+            raise NotSupportedError(
+                f"unsupported table constraint: {item.sql(dialect=SQL_DIALECT)}"
+            )
+        constraints.unique.append(
+            UniqueConstraint(
+                columns=[ident.name for ident in target.expressions], name=name
+            )
+        )
+        return
+    if isinstance(item, exp.CheckColumnConstraint):
+        constraints.checks.append(
+            CheckConstraint(expr=item.this.sql(dialect=SQL_DIALECT), name=name)
+        )
+        return
+    if isinstance(item, (exp.ForeignKey, exp.Reference)):
+        raise NotSupportedError(
+            f"FOREIGN KEY is not supported: {item.sql(dialect=SQL_DIALECT)}"
+        )
+    raise NotSupportedError(
+        f"unsupported table constraint: {item.sql(dialect='sqlite')}"
+    )
+
+
 def run_create(catalog: Catalog, ast: exp.Create) -> StatementResult:
     if ast.kind != "TABLE":
         raise NotSupportedError(f"CREATE {ast.kind} is not supported")
@@ -98,15 +168,14 @@ def run_create(catalog: Catalog, ast: exp.Create) -> StatementResult:
 
     columns: list[Column] = []
     table_pk: list[str] = []
+    constraints = _TableConstraints()
     for item in schema_node.expressions:
         if isinstance(item, exp.ColumnDef):
-            columns.append(_build_column(item))
+            columns.append(_build_column(item, constraints))
         elif isinstance(item, exp.PrimaryKey):
             table_pk.extend(ident.name for ident in item.expressions)
         else:
-            raise NotSupportedError(
-                f"unsupported table constraint: {item.sql(dialect='sqlite')}"
-            )
+            _add_table_constraint(item, constraints)
     if table_pk:
         by_name = {c.name: c for c in columns}
         for name in table_pk:
@@ -115,7 +184,12 @@ def run_create(catalog: Catalog, ast: exp.Create) -> StatementResult:
             by_name[name].primary_key = True
             by_name[name].nullable = False
 
-    schema = TableSchema(table=table, columns=columns)
+    schema = TableSchema(
+        table=table,
+        columns=columns,
+        unique=constraints.unique,
+        checks=constraints.checks,
+    )
     catalog.create_table(schema, if_not_exists=bool(node_arg(ast, "exists")))
     return StatementResult(rowcount=-1)
 
@@ -130,19 +204,42 @@ def run_drop(catalog: Catalog, ast: exp.Drop) -> StatementResult:
 def _alter_add_column(
     catalog: Catalog, schema: TableSchema, coldef: exp.ColumnDef
 ) -> None:
-    column = _build_column(coldef)
+    added = _TableConstraints()
+    column = _build_column(coldef, added)
     if column.name in schema.column_names:
         raise ProgrammingError(f"column already exists: {schema.table}.{column.name}")
     if column.primary_key:
         raise NotSupportedError("cannot add a PRIMARY KEY column with ALTER TABLE")
+    if added.unique:
+        # 既存の行にはすべて同じ既定値が入るので、非空のテーブルでは必ず重複する。
+        # sqlite も同じ理由で ADD COLUMN の UNIQUE を拒む
+        raise NotSupportedError("cannot add a UNIQUE column with ALTER TABLE")
     rows = catalog.read_rows(schema.table)
     if rows and not column.nullable and column.default is None:
         raise IntegrityError(
             f"cannot add NOT NULL column {column.name!r} without a DEFAULT "
             "to a non-empty table"
         )
-    new_schema = TableSchema(table=schema.table, columns=[*schema.columns, column])
-    catalog.write_table(new_schema, [(*row, column.default) for row in rows])
+    new_schema = TableSchema(
+        table=schema.table,
+        columns=[*schema.columns, column],
+        unique=schema.unique,
+        checks=[*schema.checks, *added.checks],
+    )
+    new_rows = [(*row, column.default) for row in rows]
+    check_expressions(new_schema, new_rows)
+    catalog.write_table(new_schema, new_rows)
+
+
+def _constraints_using(schema: TableSchema, name: str) -> list[str]:
+    """列 name を参照している UNIQUE / CHECK 制約の表示名。"""
+    using = [u.label for u in schema.unique if name in u.columns]
+    using += [
+        c.label
+        for c in schema.checks
+        if any(column.name == name for column in c.node.find_all(exp.Column))
+    ]
+    return using
 
 
 def _alter_drop_column(catalog: Catalog, schema: TableSchema, name: str) -> None:
@@ -150,9 +247,29 @@ def _alter_drop_column(catalog: Catalog, schema: TableSchema, name: str) -> None
     remaining = [c for c in schema.columns if c.name != name]
     if not remaining:
         raise ProgrammingError(f"cannot drop the only column of {schema.table!r}")
+    using = _constraints_using(schema, name)
+    if using:
+        raise ProgrammingError(
+            f"cannot drop column {schema.table}.{name}: "
+            f"used by constraint {', '.join(using)}"
+        )
     rows = catalog.read_rows(schema.table)
-    new_schema = TableSchema(table=schema.table, columns=remaining)
+    new_schema = TableSchema(
+        table=schema.table,
+        columns=remaining,
+        unique=schema.unique,
+        checks=schema.checks,
+    )
     catalog.write_table(new_schema, [row[:index] + row[index + 1 :] for row in rows])
+
+
+def _rename_in_expression(node: exp.Expression, old: str, new: str) -> str:
+    """CHECK 式の中の列参照を付け替えて SQL 文字列に戻す。"""
+    renamed = node.copy()
+    for column in renamed.find_all(exp.Column):
+        if column.name == old:
+            column.set("this", exp.to_identifier(new))
+    return renamed.sql(dialect=SQL_DIALECT)
 
 
 def _alter_rename_column(
@@ -171,8 +288,20 @@ def _alter_rename_column(
         )
         for c in schema.columns
     ]
+    unique = [
+        UniqueConstraint(
+            columns=[new if name == old else name for name in u.columns], name=u.name
+        )
+        for u in schema.unique
+    ]
+    checks = [
+        CheckConstraint(expr=_rename_in_expression(c.node, old, new), name=c.name)
+        for c in schema.checks
+    ]
     # 行は列順に並んだ値なので、列名を変えても中身は動かない
-    new_schema = TableSchema(table=schema.table, columns=columns)
+    new_schema = TableSchema(
+        table=schema.table, columns=columns, unique=unique, checks=checks
+    )
     catalog.write_table(new_schema, catalog.read_rows(schema.table))
 
 

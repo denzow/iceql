@@ -255,3 +255,27 @@ class TestInitAndCheck:
         result = runner.invoke(main, ["check", dbdir])
         assert result.exit_code == 1
         assert "NOT NULL" in result.output
+
+    def test_check_detects_duplicate_unique(self, runner, dbdir, tmp_path):
+        run_ok(runner, [dbdir, "-c", "CREATE TABLE t (id INTEGER PRIMARY KEY, e TEXT UNIQUE)"])
+        (tmp_path / "db" / "t.csv").write_text("id,e\n1,a\n2,a\n", encoding="utf-8")
+        result = runner.invoke(main, ["check", dbdir])
+        assert result.exit_code == 1
+        assert "line 3: duplicate value for UNIQUE (e)" in result.output
+
+    def test_check_ignores_null_unique_keys(self, runner, dbdir, tmp_path):
+        run_ok(runner, [dbdir, "-c", "CREATE TABLE t (id INTEGER PRIMARY KEY, e TEXT UNIQUE)"])
+        (tmp_path / "db" / "t.csv").write_text("id,e\n1,\\N\n2,\\N\n", encoding="utf-8")
+        result = run_ok(runner, ["check", dbdir])
+        assert result.output == "ok\n"
+
+    def test_check_detects_check_violation(self, runner, dbdir, tmp_path):
+        run_ok(
+            runner,
+            [dbdir, "-c", "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER CHECK (n > 0))"],
+        )
+        (tmp_path / "db" / "t.csv").write_text("id,n\n1,5\n2,-3\n3,\\N\n", encoding="utf-8")
+        result = runner.invoke(main, ["check", dbdir])
+        assert result.exit_code == 1
+        assert "line 3: CHECK constraint failed: n > 0" in result.output
+        assert result.output.count("CHECK constraint failed") == 1

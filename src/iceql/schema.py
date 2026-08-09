@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from sqlglot import exp
 
-from iceql.errors import DataError, IntegrityError, OperationalError
+from iceql.errors import DataError, IntegrityError, NotSupportedError, OperationalError
+from iceql.sql import SQL_DIALECT, parse_check_expression, validate_check_expression
 from iceql.types import NULL_MARKER, Value, get_type
 
 SCHEMA_VERSION = 1
@@ -42,9 +44,64 @@ class Column:
 
 
 @dataclass
+class UniqueConstraint:
+    """UNIQUE 制約。列レベルの UNIQUE も 1 列の表制約として持つ。"""
+
+    columns: list[str]
+    name: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.columns:
+            raise DataError("UNIQUE constraint must name at least one column")
+        if self.name is not None:
+            validate_identifier(self.name, "constraint name")
+        seen: set[str] = set()
+        for name in self.columns:
+            if name in seen:
+                raise DataError(f"duplicate column in UNIQUE constraint: {name!r}")
+            seen.add(name)
+
+    @property
+    def label(self) -> str:
+        return self.name or ", ".join(self.columns)
+
+
+@dataclass
+class CheckConstraint:
+    """CHECK 制約。式は SQL 文字列のまま保持する。"""
+
+    expr: str
+    name: str | None = None
+    node: exp.Expression = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.name is not None:
+            validate_identifier(self.name, "constraint name")
+        self.node = parse_check_expression(self.expr)
+
+    def unqualify(self) -> None:
+        """列参照からテーブル名を外す。
+
+        修飾を残すと、テーブル名を変えた時点で式が別テーブルの参照になる。
+        """
+        qualified = [c for c in self.node.find_all(exp.Column) if c.args.get("table")]
+        if not qualified:
+            return
+        for column in qualified:
+            column.set("table", None)
+        self.expr = self.node.sql(dialect=SQL_DIALECT)
+
+    @property
+    def label(self) -> str:
+        return self.name or self.expr
+
+
+@dataclass
 class TableSchema:
     table: str
     columns: list[Column] = field(default_factory=list)
+    unique: list[UniqueConstraint] = field(default_factory=list)
+    checks: list[CheckConstraint] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         validate_identifier(self.table, "table name")
@@ -55,6 +112,19 @@ class TableSchema:
             if col.name in seen:
                 raise DataError(f"duplicate column name: {col.name!r}")
             seen.add(col.name)
+        for constraint in self.unique:
+            for name in constraint.columns:
+                if name not in seen:
+                    raise DataError(f"no such column: {self.table}.{name}")
+        for check in self.checks:
+            validate_check_expression(check.node, table=self.table, columns=seen)
+            check.unqualify()
+
+    def renamed(self, table: str) -> TableSchema:
+        """テーブル名だけを差し替えた同じ定義を返す。"""
+        return TableSchema(
+            table=table, columns=self.columns, unique=self.unique, checks=self.checks
+        )
 
     @property
     def column_names(self) -> list[str]:
@@ -144,14 +214,75 @@ def _column_to_yaml(col: Column) -> dict[str, Any]:
     return data
 
 
+def _constraint_to_yaml(constraint: UniqueConstraint | CheckConstraint) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    if constraint.name is not None:
+        data["name"] = constraint.name
+    if isinstance(constraint, UniqueConstraint):
+        data["columns"] = list(constraint.columns)
+    else:
+        data["expr"] = constraint.expr
+    return data
+
+
 def dump_schema(schema: TableSchema) -> str:
     doc: dict[str, Any] = {
         "version": SCHEMA_VERSION,
         "table": schema.table,
         "columns": [_column_to_yaml(c) for c in schema.columns],
-        "null_marker": NULL_MARKER,
     }
+    # 制約は無いテーブルのほうが多いので、空のときはキーごと省く
+    if schema.unique:
+        doc["unique"] = [_constraint_to_yaml(u) for u in schema.unique]
+    if schema.checks:
+        doc["checks"] = [_constraint_to_yaml(c) for c in schema.checks]
+    doc["null_marker"] = NULL_MARKER
     return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, default_flow_style=False)
+
+
+def _constraint_entries(doc: dict[str, Any], key: str, *, source: str) -> list[Any]:
+    raw = doc.get(key)
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise OperationalError(f"{source}: {key!r} must be a list")
+    return raw
+
+
+def _load_unique(doc: dict[str, Any], *, source: str) -> list[UniqueConstraint]:
+    out: list[UniqueConstraint] = []
+    for i, raw in enumerate(_constraint_entries(doc, "unique", source=source)):
+        if not isinstance(raw, dict):
+            raise OperationalError(f"{source}: unique[{i}] must be a mapping")
+        unknown = set(raw) - {"name", "columns"}
+        if unknown:
+            raise OperationalError(f"{source}: unique[{i}] has unknown keys: {sorted(unknown)}")
+        columns = raw.get("columns")
+        if not isinstance(columns, list) or not all(isinstance(c, str) for c in columns):
+            raise OperationalError(f"{source}: unique[{i}]: 'columns' must be a list of names")
+        try:
+            out.append(UniqueConstraint(columns=list(columns), name=raw.get("name")))
+        except DataError as exc:
+            raise OperationalError(f"{source}: unique[{i}]: {exc}") from exc
+    return out
+
+
+def _load_checks(doc: dict[str, Any], *, source: str) -> list[CheckConstraint]:
+    out: list[CheckConstraint] = []
+    for i, raw in enumerate(_constraint_entries(doc, "checks", source=source)):
+        if not isinstance(raw, dict):
+            raise OperationalError(f"{source}: checks[{i}] must be a mapping")
+        unknown = set(raw) - {"name", "expr"}
+        if unknown:
+            raise OperationalError(f"{source}: checks[{i}] has unknown keys: {sorted(unknown)}")
+        expr = raw.get("expr")
+        if not isinstance(expr, str):
+            raise OperationalError(f"{source}: checks[{i}]: 'expr' must be a string")
+        try:
+            out.append(CheckConstraint(expr=expr, name=raw.get("name")))
+        except (DataError, NotSupportedError) as exc:
+            raise OperationalError(f"{source}: checks[{i}]: {exc}") from exc
+    return out
 
 
 def load_schema(text: str, *, source: str = "<schema>") -> TableSchema:
@@ -189,9 +320,11 @@ def load_schema(text: str, *, source: str = "<schema>") -> TableSchema:
             )
         except DataError as exc:
             raise OperationalError(f"{source}: columns[{i}]: {exc}") from exc
+    unique = _load_unique(doc, source=source)
+    checks = _load_checks(doc, source=source)
     try:
-        return TableSchema(table=table, columns=columns)
-    except DataError as exc:
+        return TableSchema(table=table, columns=columns, unique=unique, checks=checks)
+    except (DataError, NotSupportedError) as exc:
         raise OperationalError(f"{source}: {exc}") from exc
 
 

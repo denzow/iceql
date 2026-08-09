@@ -1,7 +1,14 @@
 import pytest
 
 from iceql.errors import DataError, IntegrityError, OperationalError
-from iceql.schema import Column, TableSchema, dump_schema, load_schema
+from iceql.schema import (
+    CheckConstraint,
+    Column,
+    TableSchema,
+    UniqueConstraint,
+    dump_schema,
+    load_schema,
+)
 
 
 def make_schema() -> TableSchema:
@@ -139,3 +146,69 @@ class TestYamlRoundtrip:
     def test_load_rejects_invalid_yaml(self):
         with pytest.raises(OperationalError):
             load_schema("{: :")
+
+
+CONSTRAINED = TableSchema(
+    table="u",
+    columns=[
+        Column(name="id", type="integer", primary_key=True),
+        Column(name="e", type="text"),
+        Column(name="n", type="integer"),
+    ],
+    unique=[UniqueConstraint(columns=["e"]), UniqueConstraint(columns=["e", "n"], name="uq")],
+    checks=[CheckConstraint(expr="n > 0"), CheckConstraint(expr="n < 100", name="ck")],
+)
+
+
+class TestConstraints:
+    def test_roundtrip(self):
+        loaded = load_schema(dump_schema(CONSTRAINED))
+        assert loaded == CONSTRAINED
+
+    def test_omitted_when_empty(self):
+        text = dump_schema(make_schema())
+        assert "unique:" not in text
+        assert "checks:" not in text
+
+    def test_schema_without_constraints_still_loads(self):
+        # 既存のスキーマファイル(unique / checks なし)がそのまま読める
+        loaded = load_schema(dump_schema(make_schema()))
+        assert loaded.unique == [] and loaded.checks == []
+
+    def test_unique_rejects_unknown_column(self):
+        with pytest.raises(DataError, match="no such column"):
+            TableSchema(
+                table="u",
+                columns=[Column(name="a", type="integer")],
+                unique=[UniqueConstraint(columns=["b"])],
+            )
+
+    def test_check_rejects_unknown_column(self):
+        with pytest.raises(DataError, match="no such column"):
+            TableSchema(
+                table="u",
+                columns=[Column(name="a", type="integer")],
+                checks=[CheckConstraint(expr="b > 0")],
+            )
+
+    def test_load_rejects_unknown_constraint_key(self):
+        text = (
+            "version: 1\ntable: u\ncolumns:\n  - {name: a, type: integer}\n"
+            "unique:\n  - {columns: [a], oops: 1}\n"
+        )
+        with pytest.raises(OperationalError, match="unknown keys"):
+            load_schema(text)
+
+    def test_load_rejects_broken_check_expression(self):
+        text = (
+            "version: 1\ntable: u\ncolumns:\n  - {name: a, type: integer}\n"
+            "checks:\n  - {expr: 'a >'}\n"
+        )
+        with pytest.raises(OperationalError):
+            load_schema(text)
+
+    def test_renamed_keeps_constraints(self):
+        renamed = CONSTRAINED.renamed("v")
+        assert renamed.table == "v"
+        assert renamed.unique == CONSTRAINED.unique
+        assert renamed.checks == CONSTRAINED.checks

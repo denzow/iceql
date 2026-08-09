@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 import iceql
+from iceql.errors import IntegrityError
 
 SETUP = [
     "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL, score REAL, tag TEXT)",
@@ -64,6 +65,55 @@ def test_dml_state_matches_sqlite(tmp_path, statements):
             assert actual_count == expected_count, f"rowcount mismatch for: {sql}"
     expected = normalize_rows(lite.execute("SELECT * FROM t ORDER BY id").fetchall())
     actual = normalize_rows(ice.execute("SELECT * FROM t ORDER BY id").fetchall())
+    assert actual == expected
+    lite.close()
+    ice.close()
+
+
+CONSTRAINT_SETUP = [
+    "CREATE TABLE c (id INTEGER PRIMARY KEY, e TEXT UNIQUE, n INTEGER CHECK (n > 0), "
+    "a INTEGER, b INTEGER, UNIQUE (a, b))",
+    "INSERT INTO c VALUES (1, 'x', 1, 1, 1), (2, 'y', 2, 1, 2), (3, NULL, NULL, NULL, NULL)",
+]
+
+CONSTRAINT_CASES = [
+    "INSERT INTO c VALUES (4, 'x', 1, 2, 1)",
+    "INSERT INTO c VALUES (4, 'z', 0, 2, 1)",
+    "INSERT INTO c VALUES (4, 'z', 1, 1, 2)",
+    # NULL を含むキーは重複とみなさず、NULL の CHECK も通る
+    "INSERT INTO c VALUES (4, NULL, NULL, NULL, NULL)",
+    "INSERT INTO c VALUES (4, 'z', 1, 1, NULL)",
+    "UPDATE c SET e = 'y' WHERE id = 1",
+    "UPDATE c SET n = 0 WHERE id = 1",
+    "UPDATE c SET n = n + 1",
+    # 同じ値で上書きする更新は重複にならない
+    "UPDATE c SET e = e WHERE id = 1",
+    "DELETE FROM c WHERE id = 1",
+]
+
+
+@pytest.mark.parametrize("sql", CONSTRAINT_CASES)
+def test_constraint_violations_match_sqlite(tmp_path, sql):
+    lite = sqlite3.connect(":memory:")
+    ice = iceql.connect(tmp_path / "db")
+    for setup in CONSTRAINT_SETUP:
+        lite.execute(setup)
+        ice.execute(setup)
+
+    expected_error = None
+    try:
+        lite.execute(sql)
+    except sqlite3.IntegrityError as exc:
+        expected_error = str(exc)
+    actual_error = None
+    try:
+        ice.execute(sql)
+    except IntegrityError as exc:
+        actual_error = str(exc)
+    assert actual_error == expected_error, sql
+
+    expected = lite.execute("SELECT * FROM c ORDER BY id").fetchall()
+    actual = ice.execute("SELECT * FROM c ORDER BY id").fetchall()
     assert actual == expected
     lite.close()
     ice.close()

@@ -86,7 +86,7 @@ mydb=# \q
 他のツールに渡すときは `--null-marker` で表現を変えられる（`iceql mydb -c "SELECT * FROM users" -f csv --null-marker '' > users.csv`）。
 空文字列を指定すると NULL と空文字列が出力上で区別できなくなり、その出力を読み直しても区別は戻せない。
 
-`iceql check mydb` はスキーマと CSV の整合性（型、NOT NULL、主キー重複、正規形）を検証し、問題があれば非ゼロで終了する。
+`iceql check mydb` はスキーマと CSV の整合性（型、NOT NULL、主キー重複、UNIQUE、CHECK、正規形）を検証し、問題があれば非ゼロで終了する。
 手編集した CSV の検証を CI や pre-commit に組み込める。
 
 ## CSV の取り込み
@@ -153,6 +153,7 @@ conn.executemany("INSERT INTO users VALUES (?, ?, ?)", rows)
 - SELECT：WHERE、JOIN（INNER / LEFT）、GROUP BY、集約関数、HAVING、ORDER BY（NULLS FIRST / LAST 対応）、LIMIT / OFFSET、DISTINCT、IN サブクエリ、CTE（WITH）、UNION / UNION ALL
 - DML：INSERT（VALUES / SELECT）、UPDATE、DELETE
 - DDL：CREATE TABLE、DROP TABLE、ALTER TABLE（ADD / DROP / RENAME COLUMN、RENAME TO）
+- 制約：PRIMARY KEY、NOT NULL、DEFAULT、UNIQUE、CHECK。UNIQUE と CHECK はスキーマ YAML に記録し、INSERT / UPDATE で検査する。手編集した CSV には `iceql check` が同じ検査をかける。NULL の扱いは sqlite に合わせ、NULL を含むキーは重複とみなさず、NULL に評価される CHECK は通す
 - トランザクション：BEGIN / COMMIT / ROLLBACK（変更はメモリに溜まり、COMMIT で一括書き出し）。
   DDL もトランザクション内で使えるため、スキーマ変更とそれに伴うデータ移行を 1 つの単位でコミットできる。
   書き手同士は直列化される。BEGIN は DB 全体の書き込みロックを COMMIT / ROLLBACK まで保持し、後発の書き手はその解放を待つ（`connect(timeout=...)` 秒を超えると `OperationalError`）。
@@ -211,6 +212,7 @@ $ iceql mcp mydb --read-only   # --read-only を外すと書き込み系ツー�
 - ウィンドウ関数、集約内の DISTINCT（`COUNT(DISTINCT x)` など）、SELECT 句のスカラサブクエリ、`UPDATE ... FROM` は未対応（明確なエラーになる）
 - テーブルは実行時に全件メモリに載る。想定スコープは「LLM がそのまま読めるサイズ」（数万行規模）のデータベースである
 - 接続は一度読んだテーブルを保持し、CSV とスキーマファイルの inode・更新時刻・サイズが変わったときに読み直す。iceql の書き込みは一時ファイルの置換なので必ず読み直しになるが、更新時刻の分解能が秒までのファイルシステムでは、外部から同一秒内に同じサイズで上書きした変更を取り逃がすことがある
+- FOREIGN KEY は未対応。CREATE TABLE の `REFERENCES` 句は黙って落とさず、明確なエラーになる
 - プロセス間ロックに fcntl を使うため、Windows は未対応
 
 ## 開発

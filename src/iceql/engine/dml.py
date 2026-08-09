@@ -8,6 +8,7 @@ SELECT と完全に一致し、式評価器を自前で持たずに済む。
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from itertools import islice
 from operator import itemgetter
 
@@ -67,6 +68,55 @@ def _check_primary_key(schema: TableSchema, rows: list[Row], checked: int = 0) -
                 f"UNIQUE constraint failed: {schema.table} primary key {key!r}"
             )
         seen.add(key)
+
+
+def check_unique(schema: TableSchema, rows: list[Row], checked: int = 0) -> None:
+    """UNIQUE 制約の重複を検査する。
+
+    キーに NULL を含む行は対象外にする。sqlite と同じで、NULL どうしは
+    重複とみなさない。``checked`` の扱いは _check_primary_key と同じで、
+    先頭のその行数はキー集合を作るためだけに走査する。
+    """
+    for constraint in schema.unique:
+        indexes = [schema.column_index(name) for name in constraint.columns]
+        seen: set[tuple[Value, ...]] = set()
+        for position, row in enumerate(rows):
+            key = tuple(row[i] for i in indexes)
+            if any(value is None for value in key):
+                continue
+            if position >= checked and key in seen:
+                target = ", ".join(f"{schema.table}.{c}" for c in constraint.columns)
+                raise IntegrityError(f"UNIQUE constraint failed: {target}")
+            seen.add(key)
+
+
+def check_expressions(
+    schema: TableSchema, rows: list[Row], changed: Sequence[int] | None = None
+) -> None:
+    """CHECK 制約を検査する。``changed`` を渡すとその行だけを対象にする。
+
+    式は WHERE と同じ経路(SELECT への還元)で評価する。CHECK は式が FALSE の
+    ときだけ違反なので、``WHERE NOT (式)`` が返した行がそのまま違反行になる
+    (NULL の行は WHERE を通らない)。
+    """
+    if not schema.checks:
+        return
+    target_rows = rows if changed is None else [rows[i] for i in changed]
+    if not target_rows:
+        return
+    tables = {schema.table: sqlglot_table(schema.column_names, target_rows)}
+    annotations = {
+        schema.table: {c.name: executor._SQLGLOT_TYPES[c.type] for c in schema.columns}
+    }
+    for check in schema.checks:
+        select = (
+            exp.select(exp.Literal.number(1))
+            .from_(schema.table)
+            .where(exp.not_(check.node.copy()))
+        )
+        _, failed = executor.evaluate(select, tables, annotations)
+        if failed:
+            raise IntegrityError(f"CHECK constraint failed: {check.label}")
 
 
 def _next_autoincrement(rows: list[Row], index: int) -> int:
@@ -161,6 +211,8 @@ def run_insert(catalog: Catalog, ast: exp.Insert) -> StatementResult:
             last_id = assigned
         rows.append(validated)
     _check_primary_key(schema, rows, existing)
+    check_unique(schema, rows, existing)
+    check_expressions(schema, rows, range(existing, len(rows)))
     catalog.write_rows(table, rows, schema)
     return StatementResult(rowcount=len(new_values), lastrowid=last_id)
 
@@ -194,6 +246,7 @@ def run_update(catalog: Catalog, ast: exp.Update) -> StatementResult:
     _, matched = executor.evaluate(select, tables, annotations)
 
     set_indexes = [schema.column_index(column) for column, _ in set_items]
+    changed: list[int] = []
     for row in matched:
         rowid = row[0]
         assert isinstance(rowid, int)
@@ -201,7 +254,10 @@ def run_update(catalog: Catalog, ast: exp.Update) -> StatementResult:
         for index, value in zip(set_indexes, row[1:], strict=True):
             updated[index] = value
         rows[rowid] = schema.validate_values(updated)
+        changed.append(rowid)
     _check_primary_key(schema, rows)
+    check_unique(schema, rows)
+    check_expressions(schema, rows, changed)
     catalog.write_rows(table, rows, schema)
     return StatementResult(rowcount=len(matched))
 
