@@ -189,6 +189,25 @@ def _rowid_tables(
     return tables, annotations
 
 
+def _reduced_select(
+    catalog: Catalog,
+    select: exp.Select,
+    table: str,
+    schema: TableSchema,
+    rows: list[Row],
+) -> tuple[exp.Select, dict[str, Table], dict[str, dict[str, str]]]:
+    """還元した SELECT を、SELECT 文と同じ前処理を通してから評価にかける。
+
+    WHERE の中のサブクエリは SELECT のときと同じ扱いが要る。素通しすると、
+    たとえば ``DELETE ... WHERE id NOT IN (SELECT ...)`` の述語が効かず、
+    表の全行が消える。
+    """
+    executor._precheck(select)
+    tables, annotations = _rowid_tables(catalog, select, table, schema, rows)
+    rewritten = executor.rewrite_subqueries(select, tables, annotations)
+    return cast("exp.Select", rewritten), tables, annotations
+
+
 class _Returning:
     """RETURNING 句が返す行を集めて評価する。
 
@@ -809,7 +828,7 @@ def _reduce_update(
     select = exp.select(ROWID, *set_projections).from_(table)
     if condition is not None:
         select = select.where(condition.copy())
-    tables, annotations = _rowid_tables(catalog, select, table, schema, rows)
+    select, tables, annotations = _reduced_select(catalog, select, table, schema, rows)
     _, matched = executor.evaluate(select, tables, annotations)
 
     changed: list[int] = []
@@ -891,7 +910,7 @@ def run_delete(catalog: Catalog, ast: exp.Delete) -> StatementResult:
         select = exp.select(ROWID).from_(table)
         if condition is not None:
             select = select.where(condition.copy())
-        tables, annotations = _rowid_tables(catalog, select, table, schema, rows)
+        select, tables, annotations = _reduced_select(catalog, select, table, schema, rows)
         _, matched = executor.evaluate(select, tables, annotations)
         doomed = {row[0] for row in matched}
 

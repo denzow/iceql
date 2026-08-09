@@ -114,6 +114,15 @@ class TestBasicSelect:
         rows = q(conn, "SELECT id FROM users WHERE NOT EXISTS (SELECT 1 FROM depts LIMIT 1)")
         assert rows == []
 
+    def test_not_in_subquery_with_limit(self, conn):
+        # 実体化してから畳むので、LIMIT 付きの NOT IN も評価できる
+        rows = q(
+            conn,
+            "SELECT id FROM users "
+            "WHERE id NOT IN (SELECT id FROM depts ORDER BY id LIMIT 1) ORDER BY id",
+        )
+        assert rows == [(2,), (3,), (4,)]
+
     def test_limit_in_subquery_over_cte(self, conn):
         # 実体化したサブクエリが外側の CTE を参照する
         rows = q(
@@ -196,6 +205,94 @@ class TestJoinAggregate:
     def test_union_all(self, conn):
         rows = q(conn, "SELECT name FROM users WHERE id = 1 UNION ALL SELECT dept FROM depts")
         assert rows == [("alice",), ("eng",), ("sales",)]
+
+
+class TestNotInAndExists:
+    """NOT IN と非相関 EXISTS。どちらも sqlglot の unnest が扱わない形。"""
+
+    def test_not_in_subquery(self, conn):
+        rows = q(
+            conn, "SELECT id FROM users WHERE id NOT IN (SELECT id FROM depts) ORDER BY id"
+        )
+        assert rows == [(3,), (4,)]
+
+    def test_not_in_subquery_parenthesized(self, conn):
+        # NOT (x IN ...) は sqlglot の見送り条件を素通りして anti join になる形
+        rows = q(
+            conn,
+            "SELECT id FROM users WHERE NOT (id IN (SELECT id FROM depts)) ORDER BY id",
+        )
+        assert rows == [(3,), (4,)]
+
+    def test_not_in_subquery_with_null(self, conn):
+        # サブクエリの値に NULL があると NOT IN はどの行でも真にならない
+        rows = q(conn, "SELECT id FROM users WHERE id NOT IN (SELECT dept_id FROM users)")
+        assert rows == []
+
+    def test_not_in_null_on_the_left(self, conn):
+        # 左辺が NULL の行は NOT IN が NULL になるので WHERE を通らない(carol)
+        rows = q(
+            conn,
+            "SELECT id FROM users "
+            "WHERE dept_id NOT IN (SELECT id FROM depts WHERE id = 1) ORDER BY id",
+        )
+        assert rows == [(2,)]
+
+    def test_not_in_empty_subquery(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM users "
+            "WHERE id NOT IN (SELECT id FROM depts WHERE id > 99) ORDER BY id",
+        )
+        assert rows == [(1,), (2,), (3,), (4,)]
+
+    def test_not_in_under_or(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM users "
+            "WHERE id NOT IN (SELECT id FROM depts) OR name = 'alice' ORDER BY id",
+        )
+        assert rows == [(1,), (3,), (4,)]
+
+    def test_not_in_in_aggregate_query(self, conn):
+        assert q(conn, "SELECT COUNT(*) FROM users WHERE id NOT IN (SELECT id FROM depts)") == [
+            (2,)
+        ]
+
+    def test_exists_uncorrelated(self, conn):
+        rows = q(conn, "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM depts) ORDER BY id")
+        assert rows == [(1,), (2,), (3,), (4,)]
+
+    def test_exists_uncorrelated_empty(self, conn):
+        rows = q(conn, "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM depts WHERE id > 99)")
+        assert rows == []
+
+    def test_not_exists_uncorrelated(self, conn):
+        assert q(conn, "SELECT id FROM users WHERE NOT EXISTS (SELECT 1 FROM depts)") == []
+
+    def test_not_exists_uncorrelated_empty(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM users "
+            "WHERE NOT EXISTS (SELECT 1 FROM depts WHERE id > 99) ORDER BY id",
+        )
+        assert rows == [(1,), (2,), (3,), (4,)]
+
+    def test_exists_combined_with_other_predicates(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM depts) AND id > 2 ORDER BY id",
+        )
+        assert rows == [(3,), (4,)]
+
+    def test_correlated_exists_still_works(self, conn):
+        # 相関 EXISTS は sqlglot の decorrelate が join へ書き換える
+        rows = q(
+            conn,
+            "SELECT id FROM users u "
+            "WHERE EXISTS (SELECT 1 FROM depts d WHERE d.id = u.dept_id) ORDER BY id",
+        )
+        assert rows == [(1,), (2,), (4,)]
 
 
 class TestOrderByNulls:
@@ -293,11 +390,32 @@ class TestErrors:
         with pytest.raises(NotSupportedError, match="scalar subquer"):
             conn.execute("SELECT name, (SELECT MAX(id) FROM depts) FROM users")
 
-    def test_limit_in_not_in_subquery_clear_error(self, conn):
-        # sqlglot は NOT IN の unnest を意図的に見送るため、実体化しても評価できない
-        with pytest.raises(NotSupportedError, match="NOT IN subquery"):
+    def test_not_in_correlated_subquery_clear_error(self, conn):
+        # 外側の行ごとに値の集合が変わるので、一度の評価では畳めない
+        with pytest.raises(NotSupportedError, match="NOT IN with a correlated subquery"):
             conn.execute(
-                "SELECT id FROM users WHERE id NOT IN (SELECT id FROM depts LIMIT 1)"
+                "SELECT id FROM users u "
+                "WHERE id NOT IN (SELECT id FROM depts d WHERE d.id = u.dept_id)"
+            )
+
+    def test_not_in_multi_column_subquery_clear_error(self, conn):
+        with pytest.raises(NotSupportedError, match="multi-column subquery"):
+            conn.execute(
+                "SELECT id FROM users WHERE (id, name) NOT IN (SELECT id, dept FROM depts)"
+            )
+
+    def test_not_in_outside_boolean_context_clear_error(self, conn):
+        # CASE の中では NULL と偽が別の結果になるので、NULL を偽に落とせない
+        with pytest.raises(NotSupportedError, match="only supported in WHERE"):
+            conn.execute(
+                "SELECT id FROM users "
+                "WHERE CASE WHEN id NOT IN (SELECT id FROM depts) THEN 1 ELSE 0 END = 1"
+            )
+
+    def test_double_negated_in_subquery_clear_error(self, conn):
+        with pytest.raises(NotSupportedError, match="only supported in WHERE"):
+            conn.execute(
+                "SELECT id FROM users WHERE NOT (id NOT IN (SELECT id FROM depts))"
             )
 
     def test_limit_in_correlated_subquery_clear_error(self, conn):

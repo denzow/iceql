@@ -89,6 +89,55 @@ def test_dml_state_matches_sqlite(tmp_path, statements):
     ice.close()
 
 
+SUBQUERY_SETUP = [
+    "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL, tag TEXT)",
+    "CREATE TABLE u (id INTEGER, tag TEXT)",
+    "INSERT INTO t (id, name, tag) VALUES "
+    "(1, 'a', 'x'), (2, 'b', 'y'), (3, 'c', NULL), (4, 'd', 'x')",
+    "INSERT INTO u (id, tag) VALUES (2, 'x'), (3, NULL), (9, 'y')",
+]
+
+# WHERE の中のサブクエリ。素通しすると DELETE が表を空にするなど、
+# 誤答が読み取りより重い形で出る
+SUBQUERY_DML_CASES = [
+    ["DELETE FROM t WHERE id IN (SELECT id FROM u)"],
+    ["DELETE FROM t WHERE id NOT IN (SELECT id FROM u)"],
+    ["DELETE FROM t WHERE id NOT IN (SELECT id FROM u WHERE id > 100)"],
+    # サブクエリの値に NULL が混じる / 左辺が NULL になる
+    ["DELETE FROM t WHERE tag NOT IN (SELECT tag FROM u)"],
+    ["DELETE FROM t WHERE tag NOT IN (SELECT tag FROM u WHERE tag IS NOT NULL)"],
+    ["DELETE FROM t WHERE id IN (SELECT id FROM u ORDER BY id LIMIT 1)"],
+    ["DELETE FROM t WHERE EXISTS (SELECT 1 FROM u)"],
+    ["DELETE FROM t WHERE EXISTS (SELECT 1 FROM u WHERE id > 100)"],
+    ["DELETE FROM t WHERE NOT EXISTS (SELECT 1 FROM u WHERE id > 100)"],
+    ["DELETE FROM t WHERE NOT EXISTS (SELECT 1 FROM u WHERE u.id = t.id)"],
+    ["UPDATE t SET tag = 'z' WHERE id NOT IN (SELECT id FROM u)"],
+    ["UPDATE t SET tag = 'z' WHERE EXISTS (SELECT 1 FROM u WHERE u.id = t.id)"],
+    ["UPDATE t SET name = name || '!' WHERE id NOT IN (SELECT id FROM u) AND tag = 'x'"],
+    [
+        "DELETE FROM t WHERE id NOT IN (SELECT id FROM u)",
+        "UPDATE t SET tag = 'z' WHERE EXISTS (SELECT 1 FROM u)",
+    ],
+]
+
+
+@pytest.mark.parametrize("statements", SUBQUERY_DML_CASES)
+def test_subquery_dml_state_matches_sqlite(tmp_path, statements):
+    lite = sqlite3.connect(":memory:")
+    ice = iceql.connect(tmp_path / "db")
+    for sql in SUBQUERY_SETUP + statements:
+        expected_count = lite.execute(sql).rowcount
+        actual_count = ice.execute(sql).rowcount
+        if sql.startswith(("UPDATE", "DELETE")):
+            assert actual_count == expected_count, f"rowcount mismatch for: {sql}"
+    for table in ("t", "u"):
+        expected = lite.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
+        actual = ice.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
+        assert actual == expected, f"table {table} after: {statements}"
+    lite.close()
+    ice.close()
+
+
 CONSTRAINT_SETUP = [
     "CREATE TABLE c (id INTEGER PRIMARY KEY, e TEXT UNIQUE, n INTEGER CHECK (n > 0), "
     "a INTEGER, b INTEGER, UNIQUE (a, b))",

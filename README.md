@@ -138,7 +138,7 @@ For anything `executemany` does not cover (mixed statements, UPDATE against many
 
 ## Supported SQL
 
-- SELECT: WHERE, JOIN (INNER / LEFT), GROUP BY, aggregate functions, HAVING, ORDER BY (with NULLS FIRST / LAST), LIMIT / OFFSET, DISTINCT, IN subqueries, CTE (WITH), UNION / UNION ALL
+- SELECT: WHERE, JOIN (INNER / LEFT), GROUP BY, aggregate functions, HAVING, ORDER BY (with NULLS FIRST / LAST), LIMIT / OFFSET, DISTINCT, `IN` / `NOT IN` / `EXISTS` / `NOT EXISTS` subqueries, CTE (WITH), UNION / UNION ALL
 - DML: INSERT (VALUES / SELECT), UPDATE, DELETE
 - RETURNING: INSERT / UPDATE / DELETE hand back the rows they wrote through the same interface as SELECT (`description` and `fetchall()`). INSERT and UPDATE return the row as written, DELETE the row as it was before removal. Aggregate functions and subqueries are not allowed inside RETURNING
 - Conflict resolution on INSERT: `INSERT OR IGNORE`, `INSERT OR REPLACE`, `ON CONFLICT ... DO NOTHING`, and `ON CONFLICT ... DO UPDATE` (including `excluded.<column>` and a `WHERE` clause). The conflict target must name the primary key or a UNIQUE constraint. `OR IGNORE` skips a row on any constraint violation, `DO NOTHING` only on a key collision — the same split SQLite makes
@@ -197,7 +197,8 @@ Four tools are exposed: query (SELECT only), execute (DML / DDL), list_tables, a
 
 - Window functions, DISTINCT inside aggregates (e.g. `COUNT(DISTINCT x)`), scalar subqueries in the SELECT list, and `UPDATE ... FROM` are not supported (they fail with a clear error)
 - A subquery with LIMIT / OFFSET is evaluated on its own before the outer query and replaced by its result, so LIMIT / OFFSET works in a FROM-clause subquery, a CTE, a scalar subquery, and an `IN` / `EXISTS` subquery. The evaluation is not short-circuited: the subquery is read in full even under `EXISTS`
-- LIMIT / OFFSET in a correlated subquery (one that references a column of the outer query) is not supported, because a single evaluation cannot determine its result. LIMIT / OFFSET inside a `NOT IN` subquery is not supported either; rewrite it as a LEFT JOIN with `IS NULL`. Both fail with a clear error
+- LIMIT / OFFSET in a correlated subquery (one that references a column of the outer query) is not supported, because a single evaluation cannot determine its result. It fails with a clear error
+- A `NOT IN` subquery is evaluated on its own and folded into an equivalent expression that keeps SQL's three-valued logic, so a NULL on either side behaves as it does in SQLite. This needs the value set to be known up front, so a correlated `NOT IN`, a multi-column `NOT IN`, and a `NOT IN` in a position where NULL and false differ (inside CASE, or under a second NOT) are not supported; rewrite them as `NOT EXISTS`. All fail with a clear error
 - Tables are fully loaded into memory at query time; the intended scope is databases small enough for an LLM to read directly (tens of thousands of rows)
 - UPDATE and DELETE take a fast path when the WHERE clause is absent or is only `column = constant` joined by AND, and (for UPDATE) every SET right-hand side is a constant or a bare column of the same table. Any other shape is evaluated by running the statement as a SELECT over the whole table, so its cost is proportional to the table size rather than to the number of rows changed
 - UPDATE re-checks PRIMARY KEY and UNIQUE only when the SET clause assigns to a column of one of those keys. Key values in the other rows do not move, so an update cannot introduce a duplicate; a duplicate that was already in a hand-edited CSV is not reported. CHECK is likewise only evaluated on the rows the statement changed

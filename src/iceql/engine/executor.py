@@ -8,12 +8,18 @@ sqlglot.executor は次の制約があるため、ORDER BY / LIMIT / OFFSET は
 射影に無いソートキーは隠し列(__ord_N)として SELECT 句に追加して値を計算させ、
 結果から取り除く。NULL の位置は SQLite と同じ既定(NULL 最小)。
 
-取り外せるのはトップレベルだけなので、サブクエリに残る LIMIT / OFFSET は
-_materialize_nested_limits で実体化する。内側のサブクエリを単体で評価し、
-結果を合成テーブルに置き換えてから外側を実行する。LIMIT が AST から消えるので
-sqlglot の optimizer が IN サブクエリの unnest を諦めなくなり、OFFSET も
-iceql 側で適用できる。外側の列を参照するサブクエリ(相関サブクエリ)は
-一度の評価で結果が決まらないので拒否する。
+sqlglot の optimizer が扱えないサブクエリは rewrite_subqueries で先に片付ける。
+内側のサブクエリを単体で評価し、結果に応じて AST を書き換えてから外側を実行する。
+外側の列を参照するサブクエリ(相関サブクエリ)は一度の評価で結果が決まらないので、
+書き換えが要る形なら拒否する。書き換えの内訳は次の 3 つ:
+
+- LIMIT / OFFSET が残るサブクエリ: 結果を合成テーブルに置き換える。LIMIT が
+  AST から消えるので optimizer が IN サブクエリの unnest を諦めなくなり、
+  OFFSET も iceql 側で適用できる
+- 非相関の EXISTS: 行の有無で値が決まるので真偽値に畳む
+- NOT IN: 三値論理どおりの式に畳む
+
+後ろ 2 つは、残すと sqlglot.executor が誤答や構文エラーを返す。
 
 テーブルは sqlglot.executor.table.Table として組み立てて渡す。行を dict の
 リストで渡すと、sqlglot が行ごと・列ごとに列名を正規化し直して別表現へ複製し、
@@ -32,7 +38,7 @@ from sqlglot.executor import execute as sqlglot_execute
 from sqlglot.executor.env import ENV, null_if_any
 from sqlglot.executor.table import Table
 from sqlglot.optimizer.qualify import qualify
-from sqlglot.optimizer.scope import build_scope
+from sqlglot.optimizer.scope import Scope, build_scope
 
 from iceql.catalog import Catalog
 from iceql.engine import SQL_DIALECT, StatementResult, node_arg
@@ -374,13 +380,12 @@ def _with_ctes(node: exp.Expression, ctes: list[exp.CTE]) -> exp.Expression:
     return node
 
 
-def _materialize(
+def _subquery_rows(
     node: exp.Expression,
-    name: str,
     tables: dict[str, Table],
     schema: dict[str, dict[str, str]],
-) -> None:
-    """サブクエリを単体で評価し、結果の合成テーブルへの参照に置き換える。"""
+) -> tuple[list[str], list[tuple[Value, ...]]]:
+    """サブクエリを切り離して単体で評価する。"""
     sub = node.copy()
     # ORDER BY / LIMIT / OFFSET の取り外しは、CTE を付けて包む前に行う
     # (包んだあとでは外側の Select に無く、内側に残ったまま executor へ渡る)
@@ -396,12 +401,18 @@ def _materialize(
         rows = rows[offset:]
     if limit is not None:
         rows = rows[:limit]
-    if isinstance(node.parent, exp.Exists):
-        # 相関していない EXISTS は行の有無で値が決まる。sqlglot の executor は
-        # EXISTS 式そのものを評価できない(生成コードが構文エラーになる)ので、
-        # 実体化した時点で真偽値に畳む。
-        node.parent.replace(exp.true() if rows else exp.false())
-        return
+    return columns, rows
+
+
+def _materialize(
+    node: exp.Expression,
+    name: str,
+    columns: list[str],
+    rows: list[tuple[Value, ...]],
+    tables: dict[str, Table],
+    schema: dict[str, dict[str, str]],
+) -> None:
+    """評価済みのサブクエリを、結果を持つ合成テーブルへの参照に置き換える。"""
     tables[name] = sqlglot_table(columns, rows)
     schema[name] = {
         column: _column_type([row[i] for row in rows]) for i, column in enumerate(columns)
@@ -409,38 +420,109 @@ def _materialize(
     node.replace(exp.select(exp.Star()).from_(exp.to_table(name)))
 
 
-def _check_not_in(node: exp.Expression) -> None:
-    """NOT IN のサブクエリは実体化しても誤答になるので拒否する。
+def _fold_not_in(
+    in_node: exp.In,
+    negation: exp.Not,
+    columns: list[str],
+    rows: list[tuple[Value, ...]],
+) -> None:
+    """NOT IN を、評価済みのサブクエリの値から三値論理どおりの式に畳む。
 
-    sqlglot の optimizer は、NULL を含むと三値論理が崩れることを理由に
-    NOT IN の unnest を意図的に見送る。残された NOT IN を executor は
-    評価できず、行が黙って素通りする。実体化しても IN が式のまま残る点は
-    変わらないため、ここで止める。
+    ``x NOT IN (v...)`` は、v が空なら真、x か v のどれかが NULL なら NULL、
+    x が v に含まれれば偽、どれでもなければ真になる。この関数を呼ぶ位置では
+    NULL と偽が同じ結果になる(_negatable_position)ので、NULL は偽に落とす。
+
+    残る形は「値に NULL が無く、x も NULL でない NOT IN」だけになる。この形なら
+    sqlglot が生成する Python の集合の帰属判定と意味が一致する。値の並びを
+    リテラルとして埋め込むのは、合成テーブルへの参照に置き換える書き方が
+    sqlglot の unnest の判定(NOT IN を見送るかどうか)に寄りかかるためである。
     """
-    predicate = node.parent
-    if isinstance(predicate, exp.Subquery):
-        predicate = predicate.parent
-    if isinstance(predicate, exp.In) and isinstance(predicate.parent, exp.Not):
+    if len(columns) != 1:
         raise NotSupportedError(
-            "LIMIT / OFFSET inside a NOT IN subquery is not supported; "
-            "rewrite it as a LEFT JOIN, e.g. "
-            "SELECT t.x FROM t LEFT JOIN (SELECT x FROM u ORDER BY x LIMIT 2) s "
-            "ON s.x = t.x WHERE s.x IS NULL"
+            "NOT IN with a multi-column subquery is not supported; "
+            "rewrite it as NOT EXISTS"
         )
+    values = [row[0] for row in rows]
+    if not values:
+        negation.replace(exp.true())
+        return
+    if any(value is None for value in values):
+        negation.replace(exp.false())
+        return
+    left = in_node.this
+    literals = [exp.convert(value) for value in dict.fromkeys(values)]
+    negation.replace(
+        exp.and_(
+            exp.Not(this=exp.Is(this=left.copy(), expression=exp.Null())),
+            exp.Not(this=exp.In(this=left.copy(), expressions=literals)),
+        )
+    )
 
 
-def _materialize_nested_limits(
+def _not_in_predicate(node: exp.Expression) -> tuple[exp.In, exp.Not] | None:
+    """サブクエリ node を包む NOT IN 述語(In と、それを否定する Not)を返す。
+
+    ``x NOT IN (...)`` は ``Not(In)`` になり、``NOT (x IN (...))`` は間に
+    ``Paren`` が挟まる。sqlglot の unnest は In の親だけを見るので後者を
+    素通しし、三値論理を保たない anti join へ書き換えてしまう。iceql は
+    両方を同じ形として拾う。
+    """
+    in_node = node.parent
+    if isinstance(in_node, exp.Subquery):
+        in_node = in_node.parent
+    if not isinstance(in_node, exp.In):
+        return None
+    negation = in_node.parent
+    while isinstance(negation, exp.Paren):
+        negation = negation.parent
+    if not isinstance(negation, exp.Not):
+        return None
+    return in_node, negation
+
+
+def _negatable_position(node: exp.Expression) -> bool:
+    """述語の NULL を偽に落としてよい位置か。
+
+    WHERE / HAVING / JOIN ON から AND / OR / 括弧だけを辿って届くなら、その
+    述語が NULL でも偽でも行の採否は変わらない。CASE の中や、さらに外側の
+    NOT の下ではこの言い換えが成り立たない。
+    """
+    current = node.parent
+    while current is not None:
+        if isinstance(current, (exp.Where, exp.Having, exp.Join)):
+            return True
+        if not isinstance(current, (exp.And, exp.Or, exp.Paren)):
+            return False
+        current = current.parent
+    return False
+
+
+def _reject_correlated(scope: Scope, clause: str) -> None:
+    outer = scope.external_columns[0].sql(dialect=SQL_DIALECT)
+    raise NotSupportedError(
+        f"{clause} in a correlated subquery is not supported "
+        f"(the subquery references {outer} from the outer query)"
+    )
+
+
+def _needs_rewrite(ast: exp.Expression) -> bool:
+    if ast.find(exp.Limit, exp.Offset, exp.Exists) is not None:
+        return True
+    return any(node_arg(node, "query") is not None for node in ast.find_all(exp.In))
+
+
+def rewrite_subqueries(
     ast: exp.Expression,
     tables: dict[str, Table],
     schema: dict[str, dict[str, str]],
 ) -> exp.Expression:
-    """トップレベル以外に残った LIMIT / OFFSET を実体化する。
+    """sqlglot の optimizer が扱えないサブクエリを、先に評価して畳む。
 
     列の修飾子を見て相関を判定するため、先に qualify を通す。修飾子なしで
     外側を参照する形(``WHERE sid = id``)は qualify しないと拾えない。
-    実体化は内側から順に行う(内側の結果を外側の評価が使う)。
+    評価は内側から順に行う(内側の結果を外側の評価が使う)。
     """
-    if ast.find(exp.Limit, exp.Offset) is None:
+    if not _needs_rewrite(ast):
         return ast
     try:
         ast = qualify(
@@ -450,25 +532,52 @@ def _materialize_nested_limits(
         raise ProgrammingError(f"invalid query: {exc}") from exc
     root = build_scope(ast)
     if root is None:
-        raise NotSupportedError("LIMIT / OFFSET in this position is not supported")
-    targets: list[exp.Expression] = []
+        raise NotSupportedError("subqueries in this position are not supported")
+    targets: list[tuple[str, exp.Expression, tuple[exp.In, exp.Not] | None]] = []
     # traverse() は内側のスコープから順に返す
     for scope in root.traverse():
         node = scope.expression
         if not isinstance(node, (exp.Select, exp.SetOperation)) or node is ast:
             continue
-        if not (node_arg(node, "limit") or node_arg(node, "offset")):
+        limited = bool(node_arg(node, "limit") or node_arg(node, "offset"))
+        if isinstance(node.parent, exp.Exists):
+            # 相関 EXISTS は sqlglot の decorrelate が join へ書き換える
+            if scope.external_columns:
+                if limited:
+                    _reject_correlated(scope, "LIMIT / OFFSET")
+                continue
+            targets.append(("exists", node, None))
             continue
-        if scope.external_columns:
-            outer = scope.external_columns[0].sql(dialect=SQL_DIALECT)
-            raise NotSupportedError(
-                "LIMIT / OFFSET in a correlated subquery is not supported "
-                f"(the subquery references {outer} from the outer query)"
-            )
-        _check_not_in(node)
-        targets.append(node)
-    for index, node in enumerate(targets):
-        _materialize(node, f"{_SYNTHETIC_PREFIX}{index}", tables, schema)
+        not_in = _not_in_predicate(node)
+        if not_in is not None:
+            if scope.external_columns:
+                raise NotSupportedError(
+                    "NOT IN with a correlated subquery is not supported; "
+                    "rewrite it as NOT EXISTS, e.g. "
+                    "SELECT t.x FROM t WHERE NOT EXISTS "
+                    "(SELECT 1 FROM u WHERE u.x = t.x AND u.k = t.k)"
+                )
+            if not _negatable_position(not_in[1]):
+                raise NotSupportedError(
+                    "NOT IN with a subquery is only supported in WHERE, HAVING "
+                    "and JOIN ON, combined with AND / OR"
+                )
+            targets.append(("not_in", node, not_in))
+            continue
+        if limited:
+            if scope.external_columns:
+                _reject_correlated(scope, "LIMIT / OFFSET")
+            targets.append(("table", node, None))
+    for index, (kind, node, not_in) in enumerate(targets):
+        columns, rows = _subquery_rows(node, tables, schema)
+        if kind == "exists":
+            # EXISTS は行の有無で値が決まる。sqlglot の executor は EXISTS 式
+            # そのものを評価できない(生成コードが構文エラーになる)ので畳む。
+            cast("exp.Expression", node.parent).replace(exp.true() if rows else exp.false())
+        elif kind == "not_in":
+            _fold_not_in(*cast("tuple[exp.In, exp.Not]", not_in), columns, rows)
+        else:
+            _materialize(node, f"{_SYNTHETIC_PREFIX}{index}", columns, rows, tables, schema)
     if ast.find(exp.Limit, exp.Offset) is not None:
         raise NotSupportedError("LIMIT / OFFSET in this position is not supported")
     return ast
@@ -478,7 +587,7 @@ def run_select(catalog: Catalog, ast: exp.Expression) -> StatementResult:
     _precheck(ast)
     keys, hidden, limit, offset = _extract_order_limit(ast)
     tables, schema = load_tables(catalog, physical_tables(ast, catalog))
-    ast = _materialize_nested_limits(ast, tables, schema)
+    ast = rewrite_subqueries(ast, tables, schema)
     columns, rows = evaluate(ast, tables, schema)
     if keys:
         rows = _sort_rows(rows, columns, keys)

@@ -117,6 +117,29 @@ SELECT_QUERIES = [
     "SELECT name FROM users WHERE dept_id IN (SELECT id FROM depts WHERE dept = 'eng')",
     "SELECT name FROM users WHERE dept_id NOT IN (SELECT id FROM depts WHERE dept = 'hr') "
     "AND dept_id IS NOT NULL",
+    # NOT IN / EXISTS(サブクエリの結果に該当する行があるデータで突き合わせる)
+    "SELECT name FROM users WHERE dept_id NOT IN (SELECT id FROM depts WHERE dept = 'hr')",
+    "SELECT id FROM users WHERE id NOT IN (SELECT id FROM depts) ORDER BY id",
+    "SELECT id FROM users WHERE NOT (id IN (SELECT id FROM depts)) ORDER BY id",
+    # サブクエリの値に NULL が混じる / 左辺が NULL になる
+    "SELECT id FROM users WHERE id NOT IN (SELECT dept_id FROM users)",
+    "SELECT id FROM users WHERE dept_id NOT IN (SELECT id FROM depts WHERE id = 1) "
+    "ORDER BY id",
+    "SELECT id FROM users WHERE id NOT IN (SELECT id FROM depts WHERE id > 99) ORDER BY id",
+    "SELECT id FROM users WHERE id NOT IN (SELECT id FROM depts) OR name = 'alice' "
+    "ORDER BY id",
+    "SELECT COUNT(*) FROM users WHERE id NOT IN (SELECT id FROM depts)",
+    "SELECT id FROM users WHERE id NOT IN (SELECT id FROM depts ORDER BY id LIMIT 2) "
+    "ORDER BY id",
+    "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM depts) ORDER BY id",
+    "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM depts WHERE id > 99)",
+    "SELECT id FROM users WHERE NOT EXISTS (SELECT 1 FROM depts)",
+    "SELECT id FROM users WHERE NOT EXISTS (SELECT 1 FROM depts WHERE id > 99) ORDER BY id",
+    "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM depts) AND age > 26 ORDER BY id",
+    "SELECT u.id FROM users u "
+    "WHERE EXISTS (SELECT 1 FROM depts d WHERE d.id = u.dept_id) ORDER BY u.id",
+    "SELECT u.id FROM users u "
+    "WHERE NOT EXISTS (SELECT 1 FROM depts d WHERE d.id = u.dept_id) ORDER BY u.id",
     "WITH grown AS (SELECT * FROM users WHERE age >= 30) SELECT name FROM grown",
     "SELECT id FROM (SELECT id FROM users ORDER BY id LIMIT 2) x ORDER BY id",
     "SELECT id, name FROM (SELECT id, name FROM users ORDER BY id DESC LIMIT 3) x "

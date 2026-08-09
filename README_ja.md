@@ -150,7 +150,7 @@ conn.executemany("INSERT INTO users VALUES (?, ?, ?)", rows)
 
 ## 対応する SQL
 
-- SELECT：WHERE、JOIN（INNER / LEFT）、GROUP BY、集約関数、HAVING、ORDER BY（NULLS FIRST / LAST 対応）、LIMIT / OFFSET、DISTINCT、IN サブクエリ、CTE（WITH）、UNION / UNION ALL
+- SELECT：WHERE、JOIN（INNER / LEFT）、GROUP BY、集約関数、HAVING、ORDER BY（NULLS FIRST / LAST 対応）、LIMIT / OFFSET、DISTINCT、`IN` / `NOT IN` / `EXISTS` / `NOT EXISTS` サブクエリ、CTE（WITH）、UNION / UNION ALL
 - DML：INSERT（VALUES / SELECT）、UPDATE、DELETE
 - RETURNING：INSERT / UPDATE / DELETE に付けると、書き込んだ行を SELECT と同じ形（`description` と `fetchall()`）で受け取れる。返るのは INSERT と UPDATE が書き込み後の行、DELETE が削除前の行。集約関数とサブクエリは RETURNING の中では使えない
 - INSERT の競合解決：`INSERT OR IGNORE`、`INSERT OR REPLACE`、`ON CONFLICT ... DO NOTHING`、`ON CONFLICT ... DO UPDATE`（`excluded.<列>` の参照と `WHERE` 句を含む）。ON CONFLICT の対象列は主キーか UNIQUE 制約と一致している必要がある。`OR IGNORE` はすべての制約違反で行を飛ばし、`DO NOTHING` はキーの競合だけを飛ばす（sqlite と同じ区別）
@@ -213,7 +213,8 @@ $ iceql mcp mydb --read-only   # --read-only を外すと書き込み系ツー�
 
 - ウィンドウ関数、集約内の DISTINCT（`COUNT(DISTINCT x)` など）、SELECT 句のスカラサブクエリ、`UPDATE ... FROM` は未対応（明確なエラーになる）
 - LIMIT / OFFSET を持つサブクエリは、外側の実行前に単体で評価して結果に置き換える。FROM 句サブクエリ・CTE・スカラサブクエリ・`IN` / `EXISTS` サブクエリのいずれでも LIMIT / OFFSET が使える。短絡はしないので、`EXISTS` の中でもサブクエリは全件読む
-- 相関サブクエリ（外側の列を参照するサブクエリ）の LIMIT / OFFSET は、一度の評価では結果が決まらないため未対応。`NOT IN` のサブクエリ内の LIMIT / OFFSET も未対応で、`IS NULL` を使った LEFT JOIN に書き換える必要がある。どちらも明確なエラーになる
+- 相関サブクエリ（外側の列を参照するサブクエリ）の LIMIT / OFFSET は、一度の評価では結果が決まらないため未対応（明確なエラーになる）
+- `NOT IN` のサブクエリは単体で評価し、SQL の三値論理を保つ式に畳む。左辺とサブクエリのどちらに NULL があっても sqlite と同じ結果になる。値の集合が先に決まっている必要があるため、相関する `NOT IN`、複数列の `NOT IN`、NULL と偽が別の結果になる位置（CASE の中、二重の NOT の下）の `NOT IN` は未対応で、`NOT EXISTS` に書き換える必要がある。いずれも明確なエラーになる
 - テーブルは実行時に全件メモリに載る。想定スコープは「LLM がそのまま読めるサイズ」（数万行規模）のデータベースである
 - UPDATE と DELETE は、WHERE が無いか `列 = 定数` の AND だけで書かれていて、かつ（UPDATE では）SET の右辺がすべて定数か同じテーブルの列参照のときに高速パスを通る。それ以外の形は文をテーブル全体への SELECT に還元して評価するため、コストは変更行数ではなくテーブルの行数に比例する
 - UPDATE が主キーと UNIQUE を検査し直すのは、SET がそのキーの列に代入するときだけである。他の行のキーの値は動かないので、更新が重複を生むことはない。手で書き換えた CSV に元から入っていた重複は報告されない。CHECK も同様に、その文が変更した行だけを対象にする
