@@ -156,6 +156,60 @@ CONFLICT_CASES = [
 ]
 
 
+RETURNING_SETUP = [
+    "CREATE TABLE r (id INTEGER PRIMARY KEY, name TEXT NOT NULL, score REAL)",
+    "INSERT INTO r VALUES (1, 'a', 1.5), (2, 'b', NULL), (3, 'c', -0.5)",
+]
+
+RETURNING_CASES = [
+    "INSERT INTO r VALUES (4, 'd', 2.0) RETURNING id, name",
+    "INSERT INTO r VALUES (4, 'd', 2.0), (5, 'e', NULL) RETURNING *",
+    "INSERT INTO r (name) VALUES ('d') RETURNING id AS k, name",
+    "INSERT INTO r (id, name) SELECT id + 10, name FROM r WHERE id < 3 RETURNING *",
+    "UPDATE r SET score = score * 2 WHERE score IS NOT NULL RETURNING id, score",
+    "UPDATE r SET name = name || '!' RETURNING id AS k, name AS n",
+    "UPDATE r SET score = 1.0 WHERE id = 99 RETURNING *",
+    "DELETE FROM r WHERE score IS NULL RETURNING *",
+    "DELETE FROM r RETURNING id, name",
+    "DELETE FROM r WHERE id = 99 RETURNING id",
+    "INSERT INTO r VALUES (1, 'z', 9.0) ON CONFLICT(id) "
+    "DO UPDATE SET score = excluded.score RETURNING *",
+    "INSERT OR IGNORE INTO r VALUES (1, 'z', 9.0), (6, 'f', 3.0) RETURNING *",
+    "INSERT OR REPLACE INTO r VALUES (1, 'z', 9.0) RETURNING *",
+]
+
+
+@pytest.mark.skipif(
+    sqlite3.sqlite_version_info < (3, 35),
+    reason="RETURNING requires SQLite 3.35 or later",
+)
+@pytest.mark.parametrize("sql", RETURNING_CASES)
+def test_returning_matches_sqlite(tmp_path, sql):
+    lite = sqlite3.connect(":memory:")
+    ice = iceql.connect(tmp_path / "db")
+    for setup in RETURNING_SETUP:
+        lite.execute(setup)
+        ice.execute(setup)
+
+    expected_cursor = lite.execute(sql)
+    expected = normalize_rows(expected_cursor.fetchall())
+    expected_names = [d[0] for d in expected_cursor.description]
+    actual_cursor = ice.execute(sql)
+    actual = normalize_rows(actual_cursor.fetchall())
+    actual_names = [d[0] for d in actual_cursor.description]
+
+    assert actual_names == expected_names, sql
+    # sqlite は RETURNING が返す行の順序を規定していないため、順序は問わない
+    # (iceql 側の順序は tests/test_dml.py の TestReturning で押さえている)
+    assert sorted(actual, key=repr) == sorted(expected, key=repr), sql
+
+    expected_state = normalize_rows(lite.execute("SELECT * FROM r ORDER BY id").fetchall())
+    actual_state = normalize_rows(ice.execute("SELECT * FROM r ORDER BY id").fetchall())
+    assert actual_state == expected_state, sql
+    lite.close()
+    ice.close()
+
+
 @pytest.mark.parametrize("sql", CONFLICT_CASES)
 def test_insert_conflict_matches_sqlite(tmp_path, sql):
     lite = sqlite3.connect(":memory:")

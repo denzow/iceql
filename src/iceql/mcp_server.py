@@ -33,9 +33,13 @@ def query_tool(conn: iceql.Connection, sql: str) -> dict[str, Any]:
 
 
 def execute_tool(conn: iceql.Connection, sql: str) -> dict[str, Any]:
-    """DML / DDL を実行する。"""
+    """DML / DDL を実行する。RETURNING が付いていれば返る行も渡す。"""
     cur = conn.execute(sql)
-    return {"rowcount": cur.rowcount}
+    result: dict[str, Any] = {"rowcount": cur.rowcount}
+    if cur.description is not None:
+        result["columns"] = [d[0] for d in cur.description]
+        result["rows"] = [list(row) for row in cur.fetchall()]
+    return result
 
 
 def list_tables_tool(conn: iceql.Connection) -> list[str]:

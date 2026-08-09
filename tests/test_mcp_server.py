@@ -22,6 +22,12 @@ class TestToolFunctions:
         result = execute_tool(conn, "INSERT INTO depts (id, dept) VALUES (3, 'hr')")
         assert result == {"rowcount": 1}
 
+    def test_execute_returning(self, conn):
+        result = execute_tool(
+            conn, "INSERT INTO depts (id, dept) VALUES (3, 'hr') RETURNING id, dept"
+        )
+        assert result == {"rowcount": 1, "columns": ["id", "dept"], "rows": [[3, "hr"]]}
+
     def test_list_tables(self, conn):
         assert list_tables_tool(conn) == ["depts", "users"]
 

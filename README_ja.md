@@ -152,6 +152,7 @@ conn.executemany("INSERT INTO users VALUES (?, ?, ?)", rows)
 
 - SELECT：WHERE、JOIN（INNER / LEFT）、GROUP BY、集約関数、HAVING、ORDER BY（NULLS FIRST / LAST 対応）、LIMIT / OFFSET、DISTINCT、IN サブクエリ、CTE（WITH）、UNION / UNION ALL
 - DML：INSERT（VALUES / SELECT）、UPDATE、DELETE
+- RETURNING：INSERT / UPDATE / DELETE に付けると、書き込んだ行を SELECT と同じ形（`description` と `fetchall()`）で受け取れる。返るのは INSERT と UPDATE が書き込み後の行、DELETE が削除前の行。集約関数とサブクエリは RETURNING の中では使えない
 - INSERT の競合解決：`INSERT OR IGNORE`、`INSERT OR REPLACE`、`ON CONFLICT ... DO NOTHING`、`ON CONFLICT ... DO UPDATE`（`excluded.<列>` の参照と `WHERE` 句を含む）。ON CONFLICT の対象列は主キーか UNIQUE 制約と一致している必要がある。`OR IGNORE` はすべての制約違反で行を飛ばし、`DO NOTHING` はキーの競合だけを飛ばす（sqlite と同じ区別）
 - DDL：CREATE TABLE、DROP TABLE、ALTER TABLE（ADD / DROP / RENAME COLUMN、RENAME TO）
 - 制約：PRIMARY KEY、NOT NULL、DEFAULT、UNIQUE、CHECK。UNIQUE と CHECK はスキーマ YAML に記録し、INSERT / UPDATE で検査する。手編集した CSV には `iceql check` が同じ検査をかける。NULL の扱いは sqlite に合わせ、NULL を含むキーは重複とみなさず、NULL に評価される CHECK は通す

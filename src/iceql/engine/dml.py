@@ -7,7 +7,8 @@ SELECT と完全に一致し、式評価器を自前で持たずに済む。
 
 INSERT の競合解決(OR IGNORE / OR REPLACE / ON CONFLICT)も同じ考え方で、
 DO UPDATE の SET 式は対象行と excluded 行を 1 行ずつのテーブルにして
-SELECT で評価する。
+SELECT で評価する。RETURNING も同様に、返す行だけを載せたテーブルへの
+SELECT に還元する(_Returning 参照)。
 """
 
 from __future__ import annotations
@@ -167,6 +168,63 @@ def _rowid_tables(
     )
     annotations[table] = annotation
     return tables, annotations
+
+
+class _Returning:
+    """RETURNING 句が返す行を集めて評価する。
+
+    書き込みの経路はどれも対象の行そのものを持っているので、その行だけを
+    載せたテーブルに対して ``SELECT <RETURNING の式> FROM t`` を実行すれば
+    値が求まる。列名の決まり方も式のセマンティクスも SELECT と一致する。
+
+    評価は書き込みの前に行う。存在しない列のような式の誤りは評価して初めて
+    分かるため、先に書き出すと、エラーを返しながら変更だけが残ってしまう。
+    """
+
+    def __init__(self, node: exp.Expression, schema: TableSchema) -> None:
+        for expr in node.expressions:
+            # サブクエリの中の集約は SELECT 句と同じ理由(未対応)で弾かれるので、
+            # 集約より先に見て、外側の形で報せる
+            if expr.find(exp.Select):
+                raise NotSupportedError("subqueries are not supported in RETURNING")
+            # 集約は sqlite も RETURNING の中では拒否する。SELECT へ還元する
+            # 都合上、素通しすると返す行が 1 行に畳まれてしまう
+            if expr.find(exp.AggFunc):
+                raise NotSupportedError(
+                    "aggregate functions are not supported in RETURNING"
+                )
+        self.schema = schema
+        self.select = exp.Select(
+            expressions=[expr.copy() for expr in node.expressions]
+        ).from_(schema.table)
+        self.rows: list[Row] = []
+
+    def add(self, row: Row) -> None:
+        self.rows.append(row)
+
+    def result(self, rowcount: int, lastrowid: int | None) -> StatementResult:
+        schema = self.schema
+        tables = {schema.table: sqlglot_table(schema.column_names, self.rows)}
+        annotations = {
+            schema.table: {c.name: executor._SQLGLOT_TYPES[c.type] for c in schema.columns}
+        }
+        columns, rows = executor.evaluate(self.select, tables, annotations)
+        return StatementResult(
+            columns=columns, rows=rows, rowcount=rowcount, lastrowid=lastrowid
+        )
+
+
+def _returning(ast: exp.Expression, schema: TableSchema) -> _Returning | None:
+    node = node_arg(ast, "returning")
+    return None if node is None else _Returning(node, schema)
+
+
+def _result(
+    returning: _Returning | None, rowcount: int, lastrowid: int | None = None
+) -> StatementResult:
+    if returning is None:
+        return StatementResult(rowcount=rowcount, lastrowid=lastrowid)
+    return returning.result(rowcount, lastrowid)
 
 
 @dataclass
@@ -450,6 +508,7 @@ def _upsert_rows(
     builder: _RowBuilder,
     new_values: Iterable[Sequence[Value]],
     conflict: _Conflict,
+    returning: _Returning | None,
 ) -> StatementResult:
     """競合解決の指定つきで行を追加する。
 
@@ -498,6 +557,8 @@ def _upsert_rows(
             for key in conflict.keys:
                 key.add(added, row)
             builder.accept(row)
+            if returning is not None:
+                returning.add(row)
             count += 1
             continue
         if conflict.action == "ignore":
@@ -514,6 +575,8 @@ def _upsert_rows(
             for key in conflict.keys:
                 key.add(target, row)
             builder.accept(row)
+            if returning is not None:
+                returning.add(row)
             count += 1
             continue
         assert evaluate_set is not None
@@ -532,12 +595,15 @@ def _upsert_rows(
         rows[target] = updated
         for key in conflict.keys:
             key.add(target, updated)
+        if returning is not None:
+            returning.add(updated)
         count += 1
 
+    result = _result(returning, count, builder.last_id)
     if dead:
         rows = [row for position, row in enumerate(rows) if position not in dead]
     catalog.write_rows(table, rows, schema)
-    return StatementResult(rowcount=count, lastrowid=builder.last_id)
+    return result
 
 
 def run_insert(catalog: Catalog, ast: exp.Insert) -> StatementResult:
@@ -569,21 +635,27 @@ def run_insert(catalog: Catalog, ast: exp.Insert) -> StatementResult:
         raise NotSupportedError(f"unsupported INSERT source: {type(source).__name__}")
 
     conflict = _conflict(ast, schema)
+    returning = _returning(ast, schema)
     rows = catalog.read_rows(table)
     builder = _RowBuilder(schema, columns, rows)
     if conflict is not None:
-        return _upsert_rows(catalog, table, schema, rows, builder, new_values, conflict)
+        return _upsert_rows(
+            catalog, table, schema, rows, builder, new_values, conflict, returning
+        )
 
     existing = len(rows)
     for values in new_values:
         validated = builder.build(values)
         builder.accept(validated)
         rows.append(validated)
+        if returning is not None:
+            returning.add(validated)
     _check_primary_key(schema, rows, existing)
     check_unique(schema, rows, existing)
     check_expressions(schema, rows, range(existing, len(rows)))
+    result = _result(returning, len(new_values), builder.last_id)
     catalog.write_rows(table, rows, schema)
-    return StatementResult(rowcount=len(new_values), lastrowid=builder.last_id)
+    return result
 
 
 def run_update(catalog: Catalog, ast: exp.Update) -> StatementResult:
@@ -592,6 +664,7 @@ def run_update(catalog: Catalog, ast: exp.Update) -> StatementResult:
         raise NotSupportedError("UPDATE ... FROM is not supported")
     table = _table_name(ast.this)
     schema = catalog.load_schema(table)
+    returning = _returning(ast, schema)
     rows = catalog.read_rows(table)
 
     set_items: list[tuple[str, exp.Expression]] = []
@@ -624,16 +697,21 @@ def run_update(catalog: Catalog, ast: exp.Update) -> StatementResult:
             updated[index] = value
         rows[rowid] = schema.validate_values(updated)
         changed.append(rowid)
+        if returning is not None:
+            # sqlite と同じく、RETURNING が返すのは更新後の値
+            returning.add(rows[rowid])
     _check_primary_key(schema, rows)
     check_unique(schema, rows)
     check_expressions(schema, rows, changed)
+    result = _result(returning, len(matched))
     catalog.write_rows(table, rows, schema)
-    return StatementResult(rowcount=len(matched))
+    return result
 
 
 def run_delete(catalog: Catalog, ast: exp.Delete) -> StatementResult:
     table = _table_name(ast.this)
     schema = catalog.load_schema(table)
+    returning = _returning(ast, schema)
     rows = catalog.read_rows(table)
 
     select = exp.select(ROWID).from_(table)
@@ -644,6 +722,13 @@ def run_delete(catalog: Catalog, ast: exp.Delete) -> StatementResult:
     _, matched = executor.evaluate(select, tables, annotations)
 
     doomed = {row[0] for row in matched}
-    remaining = [row for i, row in enumerate(rows) if i not in doomed]
+    remaining: list[Row] = []
+    for i, row in enumerate(rows):
+        if i not in doomed:
+            remaining.append(row)
+        elif returning is not None:
+            # 消える行なので、返すのは削除前の値になる
+            returning.add(row)
+    result = _result(returning, len(doomed))
     catalog.write_rows(table, remaining, schema)
-    return StatementResult(rowcount=len(doomed))
+    return result

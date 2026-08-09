@@ -497,6 +497,115 @@ class TestDelete:
         assert [r[0] for r in all_rows(conn, "users")] == [2, 3]
 
 
+class TestReturning:
+    def names(self, cur):
+        return [d[0] for d in cur.description]
+
+    def test_insert_returns_the_inserted_rows(self, conn):
+        cur = conn.execute(
+            "INSERT INTO depts (id, dept) VALUES (3, 'hr'), (4, 'legal') "
+            "RETURNING id, dept"
+        )
+        assert self.names(cur) == ["id", "dept"]
+        assert cur.fetchall() == [(3, "hr"), (4, "legal")]
+        assert cur.rowcount == 2
+
+    def test_insert_star_returns_the_assigned_key(self, conn):
+        cur = conn.execute("INSERT INTO depts (dept) VALUES ('hr') RETURNING *")
+        assert self.names(cur) == ["id", "dept"]
+        assert cur.fetchall() == [(3, "hr")]
+        assert cur.lastrowid == 3
+
+    def test_insert_returns_the_default_value(self, conn):
+        cur = conn.execute(
+            "INSERT INTO users (id, name) VALUES (10, 'zoe') RETURNING id, active"
+        )
+        assert cur.fetchall() == [(10, True)]
+
+    def test_insert_select_returns_the_inserted_rows(self, conn):
+        cur = conn.execute(
+            "INSERT INTO depts (id, dept) SELECT id + 10, name FROM users "
+            "WHERE id <= 2 RETURNING id, dept"
+        )
+        assert cur.fetchall() == [(11, "alice"), (12, "bob")]
+
+    def test_returning_expressions_and_aliases(self, conn):
+        cur = conn.execute(
+            "INSERT INTO depts (id, dept) VALUES (3, 'hr') "
+            "RETURNING id AS key, dept || '!' AS shouted"
+        )
+        assert self.names(cur) == ["key", "shouted"]
+        assert cur.fetchall() == [(3, "hr!")]
+
+    def test_update_returns_the_new_values(self, conn):
+        cur = conn.execute(
+            "UPDATE users SET age = age + 1 WHERE dept_id = 1 RETURNING id, age"
+        )
+        assert cur.fetchall() == [(1, 31), (4, 36)]
+        assert cur.rowcount == 2
+
+    def test_delete_returns_the_removed_rows(self, conn):
+        cur = conn.execute("DELETE FROM users WHERE age IS NULL RETURNING id, name")
+        assert cur.fetchall() == [(2, "bob")]
+        assert [r[0] for r in all_rows(conn, "users")] == [1, 3, 4]
+
+    def test_returning_without_matching_rows(self, conn):
+        cur = conn.execute("DELETE FROM users WHERE id = 999 RETURNING id, name")
+        assert self.names(cur) == ["id", "name"]
+        assert cur.fetchall() == []
+        assert cur.rowcount == 0
+
+    def test_do_update_returns_the_updated_row(self, conn):
+        conn.execute("CREATE TABLE stock (id INTEGER PRIMARY KEY, qty INTEGER)")
+        conn.execute("INSERT INTO stock VALUES (1, 10)")
+        cur = conn.execute(
+            "INSERT INTO stock VALUES (1, 5) ON CONFLICT (id) "
+            "DO UPDATE SET qty = stock.qty + excluded.qty RETURNING id, qty"
+        )
+        assert cur.fetchall() == [(1, 15)]
+
+    def test_or_ignore_omits_the_skipped_row(self, conn):
+        conn.execute("CREATE TABLE stock (id INTEGER PRIMARY KEY, qty INTEGER)")
+        conn.execute("INSERT INTO stock VALUES (1, 10)")
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO stock VALUES (1, 5), (2, 7) RETURNING id, qty"
+        )
+        assert cur.fetchall() == [(2, 7)]
+        assert cur.rowcount == 1
+
+    def test_or_replace_returns_the_new_row(self, conn):
+        conn.execute("CREATE TABLE stock (id INTEGER PRIMARY KEY, qty INTEGER)")
+        conn.execute("INSERT INTO stock VALUES (1, 10)")
+        cur = conn.execute(
+            "INSERT OR REPLACE INTO stock VALUES (1, 99) RETURNING id, qty"
+        )
+        assert cur.fetchall() == [(1, 99)]
+
+    def test_returning_in_a_transaction(self, conn):
+        conn.execute("BEGIN")
+        cur = conn.execute("INSERT INTO depts (id, dept) VALUES (3, 'hr') RETURNING *")
+        assert cur.fetchall() == [(3, "hr")]
+        conn.execute("COMMIT")
+        assert (3, "hr") in all_rows(conn, "depts")
+
+    def test_aggregate_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="aggregate"):
+            conn.execute("DELETE FROM users RETURNING COUNT(*)")
+        assert len(all_rows(conn, "users")) == 4
+
+    def test_subquery_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="subquer"):
+            conn.execute(
+                "DELETE FROM users RETURNING (SELECT COUNT(*) FROM depts)"
+            )
+        assert len(all_rows(conn, "users")) == 4
+
+    def test_unknown_column_is_rejected(self, conn):
+        with pytest.raises(ProgrammingError):
+            conn.execute("DELETE FROM users WHERE id = 1 RETURNING nope")
+        assert len(all_rows(conn, "users")) == 4
+
+
 class TestPersistence:
     def test_dml_persists_to_disk(self, conn):
         conn.execute("INSERT INTO depts (id, dept) VALUES (3, 'hr')")

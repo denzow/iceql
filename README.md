@@ -140,6 +140,7 @@ For anything `executemany` does not cover (mixed statements, UPDATE against many
 
 - SELECT: WHERE, JOIN (INNER / LEFT), GROUP BY, aggregate functions, HAVING, ORDER BY (with NULLS FIRST / LAST), LIMIT / OFFSET, DISTINCT, IN subqueries, CTE (WITH), UNION / UNION ALL
 - DML: INSERT (VALUES / SELECT), UPDATE, DELETE
+- RETURNING: INSERT / UPDATE / DELETE hand back the rows they wrote through the same interface as SELECT (`description` and `fetchall()`). INSERT and UPDATE return the row as written, DELETE the row as it was before removal. Aggregate functions and subqueries are not allowed inside RETURNING
 - Conflict resolution on INSERT: `INSERT OR IGNORE`, `INSERT OR REPLACE`, `ON CONFLICT ... DO NOTHING`, and `ON CONFLICT ... DO UPDATE` (including `excluded.<column>` and a `WHERE` clause). The conflict target must name the primary key or a UNIQUE constraint. `OR IGNORE` skips a row on any constraint violation, `DO NOTHING` only on a key collision — the same split SQLite makes
 - DDL: CREATE TABLE, DROP TABLE, ALTER TABLE (ADD / DROP / RENAME COLUMN, RENAME TO)
 - Constraints: PRIMARY KEY, NOT NULL, DEFAULT, UNIQUE, CHECK. UNIQUE and CHECK are recorded in the schema YAML and enforced on INSERT / UPDATE; `iceql check` applies the same two checks to hand-edited CSV. NULL follows SQLite: keys containing a NULL never collide, and a CHECK that evaluates to NULL passes
