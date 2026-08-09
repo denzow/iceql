@@ -430,8 +430,76 @@ class TestCorrelatedExists:
         assert "depts" in message
         assert "MAX" in message
 
-    def test_correlated_exists_in_the_join_on_clause_is_rejected(self, conn):
-        with pytest.raises(NotSupportedError, match="correlated EXISTS"):
+
+class TestCorrelatedExistsPosition:
+    """相関 EXISTS の置き場所。decorrelate が足す LEFT JOIN より先に評価される
+    位置(join の ON 句と HAVING)は、まだ無い列を参照して落ちるので拒否する。"""
+
+    def test_in_the_join_on_clause_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="join's ON clause"):
+            q(
+                conn,
+                "SELECT u.id FROM users u JOIN depts d ON d.id = u.dept_id "
+                "AND EXISTS (SELECT 1 FROM depts e WHERE e.id = u.dept_id)",
+            )
+
+    def test_in_an_outer_join_on_clause_is_rejected(self, conn):
+        # 外側 join では WHERE に移すと意味が変わるので、案内する書き換えが違う
+        with pytest.raises(NotSupportedError, match="outer join's ON clause") as excinfo:
+            q(
+                conn,
+                "SELECT u.id FROM users u LEFT JOIN depts d ON d.id = u.dept_id "
+                "AND EXISTS (SELECT 1 FROM depts e WHERE e.id = d.id)",
+            )
+        assert "FROM clause" in str(excinfo.value)
+
+    def test_in_having_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="correlated EXISTS in HAVING") as excinfo:
+            q(
+                conn,
+                "SELECT u.dept_id FROM users u GROUP BY u.dept_id "
+                "HAVING EXISTS (SELECT 1 FROM depts e WHERE e.id = u.dept_id)",
+            )
+        assert "move it to WHERE" in str(excinfo.value)
+
+    def test_in_the_on_clause_of_a_subquery_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="join's ON clause"):
+            q(
+                conn,
+                "SELECT x.id FROM (SELECT u.id FROM users u JOIN depts d ON d.id = u.dept_id "
+                "AND EXISTS (SELECT 1 FROM depts e WHERE e.id = u.dept_id)) x",
+            )
+
+    def test_the_same_exists_in_where_is_accepted(self, conn):
+        rows = q(
+            conn,
+            "SELECT u.id FROM users u JOIN depts d ON d.id = u.dept_id "
+            "WHERE EXISTS (SELECT 1 FROM depts e WHERE e.id = u.dept_id) ORDER BY u.id",
+        )
+        assert rows == [(1,), (2,), (4,)]
+
+    def test_uncorrelated_exists_in_the_join_on_clause_is_accepted(self, conn):
+        # 相関していない EXISTS は真偽値に畳まれるので、置き場所を選ばない
+        rows = q(
+            conn,
+            "SELECT u.id FROM users u JOIN depts d ON d.id = u.dept_id "
+            "AND EXISTS (SELECT 1 FROM depts e WHERE e.id = 1) ORDER BY u.id",
+        )
+        assert rows == [(1,), (2,), (4,)]
+
+    def test_exists_left_uncorrelated_by_the_push_out_is_accepted(self, conn):
+        # 相関する述語が全部 EXISTS の外へ出ると、残りは畳まれて置き場所を問わない
+        rows = q(
+            conn,
+            "SELECT u.id FROM users u JOIN depts d ON d.id = u.dept_id "
+            "AND EXISTS (SELECT 1 FROM depts e WHERE u.age IS NOT NULL) ORDER BY u.id",
+        )
+        assert rows == [(1,), (4,)]
+
+    def test_unrewritable_shape_is_reported_before_the_position(self, conn):
+        # 書き換えられない EXISTS は WHERE に移しても通らない。置き場所より、
+        # そもそも書き換えられないことを先に報告する
+        with pytest.raises(NotSupportedError, match="cannot be rewritten as a join"):
             q(
                 conn,
                 "SELECT u.id FROM users u JOIN depts d ON d.id = u.dept_id "

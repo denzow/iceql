@@ -211,6 +211,13 @@ SELECT_QUERIES = [
     "(SELECT 1 FROM users x WHERE x.dept_id = d.id AND u.age IS NOT NULL)) ORDER BY u.id",
     "SELECT COUNT(*) FROM users u WHERE EXISTS "
     "(SELECT 1 FROM users x WHERE x.dept_id = u.dept_id GROUP BY x.id)",
+    # EXISTS を join の ON 句に置ける形(相関していない、押し出しで相関が消える)
+    "SELECT u.id FROM users u JOIN depts d ON d.id = u.dept_id "
+    "AND EXISTS (SELECT 1 FROM depts e WHERE e.id = 1) ORDER BY u.id",
+    "SELECT u.id FROM users u JOIN depts d ON d.id = u.dept_id "
+    "AND EXISTS (SELECT 1 FROM depts e WHERE u.age IS NOT NULL) ORDER BY u.id",
+    "SELECT u.id FROM users u JOIN depts d ON d.id = u.dept_id "
+    "WHERE EXISTS (SELECT 1 FROM depts e WHERE e.id = u.dept_id) ORDER BY u.id",
     "WITH grown AS (SELECT * FROM users WHERE age >= 30) SELECT name FROM grown",
     "SELECT id FROM (SELECT id FROM users ORDER BY id LIMIT 2) x ORDER BY id",
     "SELECT id, name FROM (SELECT id, name FROM users ORDER BY id DESC LIMIT 3) x "

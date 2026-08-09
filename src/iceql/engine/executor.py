@@ -25,7 +25,9 @@ sqlglot の optimizer が扱えないサブクエリは rewrite_subqueries で�
 (相関条件に等値が無い、OR がある、など)は EXISTS 式が AST に残り、やはり
 sqlglot.executor が構文エラーを返すので、実行の前に拒否する。書き換えられても
 結果が元の意味とずれる形もあるので、decorrelate に渡す前に均す
-(_normalize_correlated_exists)。
+(_normalize_correlated_exists)。書き換えが通る形でも、EXISTS が join の ON 句や
+HAVING にあると、decorrelate が足す LEFT JOIN より先に評価されて実行が落ちるので、
+置き場所も実行の前に見る(_exists_position_rejection)。
 
 sqlglot.executor は SQL 式を Python 式に落として評価する。IN と NOT は Python の
 集合の帰属判定と ``not`` にそのまま落ちて NULL を伝播しないので、三値論理どおりに
@@ -778,6 +780,53 @@ def _reject_unnestable_exists(ast: exp.Expression) -> None:
     )
 
 
+def _exists_position_rejection(select: exp.Expression) -> str | None:
+    """相関 EXISTS の置き場所が、decorrelate の書き換えと噛み合うかを見る。
+
+    decorrelate はサブクエリを別名付きの LEFT JOIN として FROM の末尾に足し、
+    EXISTS をその別名の列の IS NOT NULL に置き換える。置き換えた式は元の位置に
+    残るので、別名を作る LEFT JOIN より先に評価される位置に EXISTS があると、
+    まだ存在しない列を参照して実行が落ちる。落ちるのは次の 2 つ。
+
+    - 先行する join の ON 句: その join は LEFT JOIN の前に評価される
+    - HAVING: 集約は join のあとに走るが、別名の列は集約の出力に無い
+
+    どちらも sqlglot.executor のステップ名と列名だけのエラーになり、SQL からは
+    追えないので、実行の前に拒否する。WHERE に置いた同じ EXISTS は通る。
+
+    返り値は拒否理由(問題ない置き場所なら None)。案内する書き換えは位置で
+    変わるため、メッセージは位置ごとに作り分ける。
+    """
+    exists = cast("exp.Exists", select.parent)
+    position = exists.find_ancestor(exp.Join, exp.Having, exp.Select)
+    subquery = f"EXISTS ({select.sql(dialect=SQL_DIALECT)})"
+    if isinstance(position, exp.Having):
+        return (
+            "a correlated EXISTS in HAVING is not supported "
+            f"(the join rewrite adds it after the aggregation): {subquery}; "
+            "move it to WHERE if it only references grouped columns, e.g. "
+            "SELECT s.k FROM s WHERE EXISTS (SELECT 1 FROM u WHERE u.k = s.k) GROUP BY s.k"
+        )
+    if not isinstance(position, exp.Join):
+        return None
+    if node_arg(position, "side"):
+        # 外側 join の ON 句の条件は WHERE に移すと意味が変わる(移すと NULL を
+        # 埋めた行が落ちる)ので、サブクエリを FROM 句に出す形を案内する。
+        return (
+            "a correlated EXISTS in an outer join's ON clause is not supported "
+            f"(the join rewrite adds it after this join): {subquery}; "
+            "move the subquery into the FROM clause and join against it, e.g. "
+            "SELECT s.id FROM s LEFT JOIN (SELECT v.id FROM v WHERE v.id IN "
+            "(SELECT u.id FROM u)) v ON v.id = s.id"
+        )
+    return (
+        "a correlated EXISTS in a join's ON clause is not supported "
+        f"(the join rewrite adds it after this join): {subquery}; "
+        "move it to WHERE, e.g. SELECT s.id FROM s JOIN v ON v.id = s.id "
+        "WHERE EXISTS (SELECT 1 FROM u WHERE u.id = s.id)"
+    )
+
+
 def _needs_rewrite(ast: exp.Expression) -> bool:
     if ast.find(exp.Limit, exp.Offset, exp.Exists) is not None:
         return True
@@ -806,6 +855,7 @@ def rewrite_subqueries(
     # 均すのは評価の対象を集める前。押し出しは EXISTS を作り直すので、
     # そのサブクエリの中にある評価の対象を先に集めると参照が外れる。
     exists_rejection = _normalize_correlated_exists(ast)
+    position_rejection: str | None = None
     root = build_scope(ast)
     if root is None:
         raise NotSupportedError("subqueries in this position are not supported")
@@ -821,6 +871,8 @@ def rewrite_subqueries(
             if scope.external_columns:
                 if limited:
                     _reject_correlated(scope, "LIMIT / OFFSET")
+                if position_rejection is None:
+                    position_rejection = _exists_position_rejection(node)
                 continue
             targets.append(("exists", node, None))
             continue
@@ -851,9 +903,14 @@ def rewrite_subqueries(
             _materialize(node, f"{_SYNTHETIC_PREFIX}{index}", columns, rows, tables, schema)
     if ast.find(exp.Limit, exp.Offset) is not None:
         raise NotSupportedError("LIMIT / OFFSET in this position is not supported")
+    # 置き場所より先に、そもそも書き換えられるか・サブクエリの形が保てるかを
+    # 報告する。書き換えられない EXISTS は WHERE に移しても通らないので、
+    # 置き場所のメッセージは原因を取り違えさせる。
     _reject_unnestable_exists(ast)
     if exists_rejection is not None:
         raise NotSupportedError(exists_rejection)
+    if position_rejection is not None:
+        raise NotSupportedError(position_rejection)
     return ast
 
 
