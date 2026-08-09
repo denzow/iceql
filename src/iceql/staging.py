@@ -10,10 +10,13 @@ DROP と RENAME の旧名は削除済みを表す番兵を置く。テーブル�
 
 from __future__ import annotations
 
+from sqlglot.executor.table import Table
+
 from iceql.catalog import Catalog
 from iceql.errors import ProgrammingError
 from iceql.schema import TableSchema
 from iceql.storage import DatabaseLock, Row
+from iceql.tablecache import sqlglot_table
 
 
 class _Dropped:
@@ -29,6 +32,8 @@ class StagedCatalog(Catalog):
     def __init__(self, base: Catalog) -> None:
         self._base = base
         self.root = base.root  # Catalog.__init__ のディレクトリ検査は済んでいる
+        # 未ステージのテーブルは base と同じ CSV を読むので、キャッシュも共有する
+        self._table_cache = base._table_cache
         self._staged: dict[str, StagedEntry] = {}
 
     def has_table(self, table: str) -> bool:
@@ -63,6 +68,16 @@ class StagedCatalog(Catalog):
             # (行そのものは tuple で不変なので、リストの複製だけで足りる)
             return list(entry[1])
         return self._base.read_rows(table)
+
+    def query_table(self, table: str, schema: TableSchema) -> Table:
+        entry = self._staged.get(table)
+        if isinstance(entry, _Dropped):
+            raise ProgrammingError(f"no such table: {table}")
+        if entry is not None:
+            # ステージ上の行はディスクに現れていないのでキャッシュに載せられない。
+            # 行リストはステージ本体と共有する(sqlglot は読むだけなので安全)
+            return sqlglot_table(schema.column_names, entry[1])
+        return super().query_table(table, schema)
 
     def write_rows(self, table: str, rows: list[Row], schema: TableSchema) -> None:
         self._staged[table] = (schema, rows)

@@ -24,7 +24,7 @@ from iceql.types import Value, decode_null, encode_null, get_type
 # 行はスキーマの列順に並べた tuple。列名からの位置解決は TableSchema が持つ。
 # 行ごとに dict を作ると固定費が大きく(5 列で 184 バイト、tuple なら 88 バイト)、
 # しかも sqlglot の executor へ渡すたびに別表現へ複製される。tuple なら複製せず
-# そのまま渡せる(executor.sqlglot_table)。
+# そのまま渡せる(tablecache.sqlglot_table)。
 Row = tuple[Value, ...]
 
 

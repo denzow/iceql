@@ -19,6 +19,7 @@ from iceql.engine import StatementResult, executor, node_arg
 from iceql.errors import IntegrityError, NotSupportedError, ProgrammingError
 from iceql.schema import TableSchema
 from iceql.storage import Row
+from iceql.tablecache import sqlglot_table
 from iceql.types import Value
 
 ROWID = "_rowid_"
@@ -96,7 +97,7 @@ def _rowid_tables(
     """対象テーブルに _rowid_ を注入し、サブクエリが参照する他テーブルも揃える。"""
     others = executor.physical_tables(select, catalog) - {table}
     tables, annotations = executor.load_tables(catalog, others)
-    tables[table] = executor.sqlglot_table(
+    tables[table] = sqlglot_table(
         [ROWID, *schema.column_names], [(i, *row) for i, row in enumerate(rows)]
     )
     annotation = {ROWID: "bigint"}

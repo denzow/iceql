@@ -8,6 +8,7 @@ sqlglot の ensure_tables は Table インスタンスを素通しするため�
 import iceql
 from iceql.engine import executor, parse_statement
 from iceql.storage import read_rows
+from iceql.tablecache import sqlglot_table
 
 
 class TestRowsAreTuples:
@@ -32,11 +33,11 @@ class TestRowsAreTuples:
 class TestSqlglotHandover:
     def test_table_shares_the_row_list(self):
         rows = [(1, "a"), (2, "b")]
-        assert executor.sqlglot_table(["id", "name"], rows).rows is rows
+        assert sqlglot_table(["id", "name"], rows).rows is rows
 
     def test_column_names_are_normalized(self):
         # 自前で作る Table は sqlglot 側で正規化されないので、渡す前に揃える
-        assert executor.sqlglot_table(["Id", "NAME"], []).columns == ("id", "name")
+        assert sqlglot_table(["Id", "NAME"], []).columns == ("id", "name")
 
     def test_evaluate_does_not_mutate_the_source_rows(self, conn):
         tables, annotations = executor.load_tables(conn._catalog, {"users", "depts"})

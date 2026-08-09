@@ -10,12 +10,11 @@ sqlglot.executor は次の制約があるため、ORDER BY / LIMIT / OFFSET は
 
 テーブルは sqlglot.executor.table.Table として組み立てて渡す。行を dict の
 リストで渡すと、sqlglot が行ごと・列ごとに列名を正規化し直して別表現へ複製し、
-その分だけ時間とメモリを使う(sqlglot_table 参照)。
+その分だけ時間とメモリを使う。組み立てと使い回しは iceql.tablecache が持つ。
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
 
@@ -24,12 +23,10 @@ from sqlglot.errors import ExecuteError, OptimizeError, SqlglotError
 from sqlglot.executor import execute as sqlglot_execute
 from sqlglot.executor.env import ENV, null_if_any
 from sqlglot.executor.table import Table
-from sqlglot.schema import normalize_name
 
 from iceql.catalog import Catalog
 from iceql.engine import SQL_DIALECT, StatementResult, node_arg
 from iceql.errors import NotSupportedError, OperationalError, ProgrammingError
-from iceql.storage import Row
 from iceql.types import Value
 
 
@@ -246,17 +243,6 @@ def physical_tables(ast: exp.Expression, catalog: Catalog) -> set[str]:
     return names
 
 
-def sqlglot_table(columns: Sequence[str], rows: list[Row]) -> Table:
-    """行リストを共有したまま sqlglot の Table を組む。
-
-    execute() が通す ensure_tables は Table インスタンスを素通しするので、
-    行ごとの dict 変換とその複製が起きない。ただし素通しされる分、列名は
-    sqlglot 側で正規化されないため、ここで normalize_name を通しておく。
-    sqlglot は渡した行リストを読むだけで、走査結果は別の Table に溜める。
-    """
-    return Table(columns=tuple(normalize_name(c).name for c in columns), rows=rows)
-
-
 def load_tables(
     catalog: Catalog, names: set[str]
 ) -> tuple[dict[str, Table], dict[str, dict[str, str]]]:
@@ -264,7 +250,8 @@ def load_tables(
     schema: dict[str, dict[str, str]] = {}
     for name in sorted(names):
         table_schema = catalog.load_schema(name)  # 存在しなければ ProgrammingError
-        tables[name] = sqlglot_table(table_schema.column_names, catalog.read_rows(name))
+        # CSV が前回のクエリから変わっていなければ Table を作り直さない
+        tables[name] = catalog.query_table(name, table_schema)
         schema[name] = {c.name: _SQLGLOT_TYPES[c.type] for c in table_schema.columns}
     return tables, schema
 

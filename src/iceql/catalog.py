@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from sqlglot.executor.table import Table
+
 from iceql import storage
 from iceql.errors import OperationalError, ProgrammingError
 from iceql.schema import TableSchema, dump_schema, read_schema_file, validate_identifier
 from iceql.storage import Row
+from iceql.tablecache import TableCache, file_stamp, sqlglot_table
 
 
 class Catalog:
@@ -15,6 +18,7 @@ class Catalog:
         self.root = Path(dbdir)
         if not self.root.is_dir():
             raise OperationalError(f"database directory does not exist: {self.root}")
+        self._table_cache = TableCache()
 
     def csv_path(self, table: str) -> Path:
         validate_identifier(table, "table name")
@@ -50,8 +54,22 @@ class Catalog:
     def read_rows(self, table: str) -> list[Row]:
         return storage.read_rows(self.csv_path(table), self.load_schema(table))
 
+    def query_table(self, table: str, schema: TableSchema) -> Table:
+        """SELECT に渡す sqlglot の Table を返す。
+
+        CSV とスキーマが前回の読み込みから変わっていなければ、前回の Table を
+        そのまま返す。sqlglot 側の変換だけでなく、CSV の読み直しと型デコードも省ける。
+        """
+        stamp = file_stamp(self.csv_path(table), self.schema_path(table))
+        return self._table_cache.get(
+            table,
+            stamp,
+            lambda: sqlglot_table(schema.column_names, self.read_rows(table)),
+        )
+
     def write_rows(self, table: str, rows: list[Row], schema: TableSchema) -> None:
         storage.write_rows(self.csv_path(table), rows, schema)
+        self._table_cache.discard(table)
 
     def create_table(self, schema: TableSchema, *, if_not_exists: bool = False) -> None:
         if self.has_table(schema.table):
@@ -66,6 +84,7 @@ class Catalog:
         """CSV とスキーマの両方を書き換える(ALTER 用)。CSV → schema の順。"""
         storage.write_rows(self.csv_path(schema.table), rows, schema)
         storage.atomic_write(self.schema_path(schema.table), dump_schema(schema))
+        self._table_cache.discard(schema.table)
 
     def drop_table(self, table: str, *, if_exists: bool = False) -> None:
         if not self.has_table(table):
@@ -75,6 +94,7 @@ class Catalog:
         # schema → CSV の順(schema が存在する間は CSV も存在している状態を保つ)
         self.schema_path(table).unlink(missing_ok=True)
         self.csv_path(table).unlink(missing_ok=True)
+        self._table_cache.discard(table)
 
     def rename_table(self, old: str, new: str) -> None:
         schema = self.load_schema(old)
