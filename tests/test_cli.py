@@ -35,6 +35,52 @@ class TestOneShot:
         result = run_ok(runner, [dbdir, "-c", "SELECT * FROM t ORDER BY id", "-f", "csv"])
         assert result.output == "id,name\n1,alice\n2,\\N\n"
 
+    def test_csv_null_marker(self, runner, dbdir):
+        run_ok(
+            runner,
+            [
+                dbdir,
+                "-c",
+                "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)",
+                "-c",
+                "INSERT INTO t VALUES (1, 'alice'), (2, NULL)",
+            ],
+        )
+        result = run_ok(
+            runner,
+            [dbdir, "-c", "SELECT * FROM t ORDER BY id", "-f", "csv", "--null-marker", ""],
+        )
+        assert result.output == "id,name\n1,alice\n2,\n"
+        result = run_ok(
+            runner,
+            [dbdir, "-c", "SELECT * FROM t ORDER BY id", "-f", "csv", "--null-marker", "NA"],
+        )
+        assert result.output == "id,name\n1,alice\n2,NA\n"
+
+    def test_csv_null_marker_single_column_stays_quoted(self, runner, dbdir):
+        """空フィールドだけの行は空行と区別できないため、正規形どおりクォートする。"""
+        run_ok(runner, [dbdir, "-c", "CREATE TABLE t (name TEXT)"])
+        run_ok(runner, [dbdir, "-c", "INSERT INTO t VALUES (NULL)"])
+        result = run_ok(runner, [dbdir, "-c", "SELECT * FROM t", "-f", "csv", "--null-marker", ""])
+        assert result.output == 'name\n""\n'
+
+    def test_null_marker_does_not_affect_other_formats(self, runner, dbdir):
+        run_ok(runner, [dbdir, "-c", "CREATE TABLE t (id INTEGER, name TEXT)"])
+        run_ok(runner, [dbdir, "-c", "INSERT INTO t VALUES (1, NULL)"])
+        result = run_ok(
+            runner, [dbdir, "-c", "SELECT * FROM t", "-f", "json", "--null-marker", "NA"]
+        )
+        assert result.output == '{"id": 1, "name": null}\n'
+        result = run_ok(
+            runner, [dbdir, "-c", "SELECT * FROM t", "-f", "table", "--null-marker", "NA"]
+        )
+        assert result.output.splitlines()[2] == "1  |"
+
+    def test_null_marker_help_warns_about_empty_marker(self, runner):
+        result = run_ok(runner, ["shell", "--help"])
+        assert "--null-marker" in result.output
+        assert "empty string" in result.output
+
     def test_table_format(self, runner, dbdir):
         run_ok(runner, [dbdir, "-c", "CREATE TABLE t (id INTEGER, name TEXT)"])
         run_ok(runner, [dbdir, "-c", "INSERT INTO t VALUES (1, 'alice')"])
@@ -113,6 +159,19 @@ class TestRepl:
         result = runner.invoke(main, ["repl", dbdir, "-f", "csv"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "one\n1\n" in result.output
+
+    def test_repl_null_marker(self, runner, dbdir):
+        stdin = (
+            "CREATE TABLE t (id INTEGER, name TEXT);\n"
+            "INSERT INTO t VALUES (1, NULL);\n"
+            "SELECT * FROM t;\n"
+            "\\q\n"
+        )
+        result = runner.invoke(
+            main, ["repl", dbdir, "-f", "csv", "--null-marker", "NA"], input=stdin
+        )
+        assert result.exit_code == 0, result.output
+        assert "id,name\n1,NA\n" in result.output
 
     def test_repl_exit_word(self, runner, dbdir):
         result = runner.invoke(main, [dbdir], input="exit\n")

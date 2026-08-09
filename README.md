@@ -82,6 +82,8 @@ mydb=# \q
 Meta commands: `\d [table]` (list / describe tables), `\x` (toggle expanded output), `\pset format table|csv|json`, `\?` (help), and `\q` (quit).
 
 `-f table|csv|json` selects the output format (defaults to table on a TTY, csv when piped).
+With `-f csv`, NULL is written as `\N`, the same convention as the stored CSV files. `--null-marker` changes that for tools that expect something else: `iceql mydb -c "SELECT * FROM users" -f csv --null-marker '' > users.csv`. An empty marker makes a NULL and an empty string look the same in the output; the distinction is gone and cannot be recovered by reading the file back.
+
 `iceql check mydb` validates schema/CSV consistency (types, NOT NULL, duplicate primary keys, canonical form) and exits non-zero on errors.
 This makes hand-edited CSV files verifiable in CI or a pre-commit hook.
 

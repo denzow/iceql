@@ -51,13 +51,13 @@ def _print_table(result: StatementResult) -> None:
         click.echo(line(row))
 
 
-def _print_csv(result: StatementResult) -> None:
+def _print_csv(result: StatementResult, *, null_marker: str = NULL_MARKER) -> None:
     from iceql.storage import _format_record
 
     assert result.columns is not None
     out = [_format_record(list(result.columns))]
     for row in result.rows:
-        out.append(_format_record([_format_value(v, null=NULL_MARKER) for v in row]))
+        out.append(_format_record([_format_value(v, null=null_marker) for v in row]))
     click.echo("".join(out), nl=False)
 
 
@@ -79,7 +79,12 @@ def _print_expanded(result: StatementResult) -> None:
 
 
 def _print_result(
-    result: StatementResult, fmt: str, *, feedback: bool, expanded: bool = False
+    result: StatementResult,
+    fmt: str,
+    *,
+    feedback: bool,
+    expanded: bool = False,
+    null_marker: str = NULL_MARKER,
 ) -> None:
     if result.columns is None:
         if feedback and result.rowcount >= 0:
@@ -90,13 +95,19 @@ def _print_result(
     elif fmt == "table":
         _print_table(result)
     elif fmt == "csv":
-        _print_csv(result)
+        _print_csv(result, null_marker=null_marker)
     else:
         _print_json(result)
 
 
 def _run_script(
-    conn: iceql.Connection, sql: str, fmt: str, *, feedback: bool, expanded: bool = False
+    conn: iceql.Connection,
+    sql: str,
+    fmt: str,
+    *,
+    feedback: bool,
+    expanded: bool = False,
+    null_marker: str = NULL_MARKER,
 ) -> None:
     """複数文を含みうる SQL 文字列を順に実行して結果を出力する。"""
     try:
@@ -106,7 +117,7 @@ def _run_script(
     for statement in statements:
         assert isinstance(statement, sqlglot.exp.Expression)
         result = conn._execute_ast(statement)
-        _print_result(result, fmt, feedback=feedback, expanded=expanded)
+        _print_result(result, fmt, feedback=feedback, expanded=expanded, null_marker=null_marker)
 
 
 class DefaultToShellGroup(click.Group):
@@ -122,6 +133,10 @@ class DefaultToShellGroup(click.Group):
 
 
 _FORMAT_OPTION_HELP = "Output format (default: table on a TTY, csv when piped)"
+_NULL_MARKER_OPTION_HELP = (
+    "Value printed for NULL in csv output. With '' a NULL and an empty string "
+    "look the same in the output."
+)
 
 
 @click.group(cls=DefaultToShellGroup, invoke_without_command=False)
@@ -144,7 +159,13 @@ def main() -> None:
     default=None,
     help=_FORMAT_OPTION_HELP,
 )
-def shell(dbdir: Path, commands: tuple[str, ...], fmt: str | None) -> None:
+@click.option(
+    "--null-marker",
+    default=NULL_MARKER,
+    show_default=True,
+    help=_NULL_MARKER_OPTION_HELP,
+)
+def shell(dbdir: Path, commands: tuple[str, ...], fmt: str | None, null_marker: str) -> None:
     """Connect to DBDIR and open a REPL, or run SQL given with -c.
 
     This is the default command: `iceql DBDIR` is equivalent to `iceql shell DBDIR`.
@@ -156,11 +177,11 @@ def shell(dbdir: Path, commands: tuple[str, ...], fmt: str | None) -> None:
         if commands:
             for sql in commands:
                 try:
-                    _run_script(conn, sql, fmt, feedback=False)
+                    _run_script(conn, sql, fmt, feedback=False, null_marker=null_marker)
                 except Error as exc:
                     raise click.ClickException(str(exc)) from exc
         else:
-            _repl(conn, fmt)
+            _repl(conn, fmt, null_marker=null_marker)
     finally:
         conn.close()
 
@@ -176,23 +197,30 @@ def shell(dbdir: Path, commands: tuple[str, ...], fmt: str | None) -> None:
     show_default=True,
     help="Output format",
 )
-def repl(dbdir: Path, fmt: str) -> None:
+@click.option(
+    "--null-marker",
+    default=NULL_MARKER,
+    show_default=True,
+    help=_NULL_MARKER_OPTION_HELP,
+)
+def repl(dbdir: Path, fmt: str, null_marker: str) -> None:
     """Connect to DBDIR and open an interactive REPL."""
     conn = iceql.connect(dbdir)
     try:
-        _repl(conn, fmt)
+        _repl(conn, fmt, null_marker=null_marker)
     finally:
         conn.close()
 
 
 class _ReplState:
-    def __init__(self, fmt: str) -> None:
+    def __init__(self, fmt: str, null_marker: str) -> None:
         self.fmt = fmt
+        self.null_marker = null_marker
         self.expanded = False
         self.quit = False
 
 
-def _repl(conn: iceql.Connection, fmt: str) -> None:
+def _repl(conn: iceql.Connection, fmt: str, *, null_marker: str = NULL_MARKER) -> None:
     # 履歴は対話利用(TTY)のときだけ扱う。パイプやテストで readline の
     # プロセス内履歴に read_history_file が「追記」される仕様のまま書き戻すと、
     # 履歴ファイルが読み書きのたびに倍々で膨らんでしまう
@@ -212,7 +240,7 @@ def _repl(conn: iceql.Connection, fmt: str) -> None:
             histfile = None
     click.echo(f"iceql ({iceql.__version__})")
     click.echo('Type "\\?" for help.')
-    state = _ReplState(fmt)
+    state = _ReplState(fmt, null_marker)
     dbname = conn._catalog.root.name
     buffer = ""
     while not state.quit:
@@ -244,7 +272,14 @@ def _repl(conn: iceql.Connection, fmt: str) -> None:
             continue
         sql, buffer = buffer, ""
         try:
-            _run_script(conn, sql, state.fmt, feedback=True, expanded=state.expanded)
+            _run_script(
+                conn,
+                sql,
+                state.fmt,
+                feedback=True,
+                expanded=state.expanded,
+                null_marker=state.null_marker,
+            )
         except Error as exc:
             click.echo(f"error: {exc}", err=True)
     if readline is not None and histfile is not None:

@@ -82,6 +82,10 @@ mydb=# \q
 メタコマンドは `\d [table]`（テーブル一覧・スキーマ表示）、`\x`（拡張表示の切り替え）、`\pset format table|csv|json`、`\?`（ヘルプ）、`\q`（終了）。
 
 `-f table|csv|json` で出力形式を選べる（既定は TTY なら table、パイプなら csv）。
+`-f csv` の NULL は保管形式と同じ `\N` で出る。
+他のツールに渡すときは `--null-marker` で表現を変えられる（`iceql mydb -c "SELECT * FROM users" -f csv --null-marker '' > users.csv`）。
+空文字列を指定すると NULL と空文字列が出力上で区別できなくなり、その出力を読み直しても区別は戻せない。
+
 `iceql check mydb` はスキーマと CSV の整合性（型、NOT NULL、主キー重複、正規形）を検証し、問題があれば非ゼロで終了する。
 手編集した CSV の検証を CI や pre-commit に組み込める。
 
