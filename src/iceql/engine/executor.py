@@ -21,6 +21,10 @@ sqlglot の optimizer が扱えないサブクエリは rewrite_subqueries で�
 
 後ろ 2 つは、残すと sqlglot.executor が誤答や構文エラーを返す。
 
+sqlglot.executor は SQL 式を Python 式に落として評価する。IN と NOT は Python の
+集合の帰属判定と ``not`` にそのまま落ちて NULL を伝播しないので、三値論理どおりに
+評価する関数へ差し替える(_sql_in / _sql_not)。
+
 テーブルは sqlglot.executor.table.Table として組み立てて渡す。行を dict の
 リストで渡すと、sqlglot が行ごと・列ごとに列名を正規化し直して別表現へ複製し、
 その分だけ時間とメモリを使う。組み立てと使い回しは iceql.tablecache が持つ。
@@ -37,6 +41,8 @@ from sqlglot.errors import ExecuteError, OptimizeError, SqlglotError
 from sqlglot.executor import execute as sqlglot_execute
 from sqlglot.executor.env import ENV, null_if_any
 from sqlglot.executor.table import Table
+from sqlglot.generator import Generator
+from sqlglot.generators.python import PythonGenerator
 from sqlglot.optimizer.qualify import qualify
 from sqlglot.optimizer.scope import Scope, build_scope
 
@@ -67,6 +73,50 @@ ENV.setdefault("NOW", datetime.now)
 # STRFTIME(fmt, value) は TIMETOSTR(TSORDSTOTIMESTAMP(value), fmt) に展開される
 ENV.setdefault("TSORDSTOTIMESTAMP", null_if_any(_to_datetime))  # type: ignore[no-untyped-call]
 ENV.setdefault("TIMETOSTR", null_if_any(lambda v, fmt: _to_datetime(v).strftime(fmt)))  # type: ignore[no-untyped-call]
+
+
+def _sql_in(value: Value, *candidates: Value) -> bool | None:
+    """IN を三値論理で評価する。
+
+    左辺が NULL なら結果は NULL。一致する値があれば真。一致が無くても値側に
+    NULL があれば「一致しないとは言い切れない」ので NULL、無ければ偽になる。
+    """
+    if value is None:
+        return None
+    unknown = False
+    for candidate in candidates:
+        if candidate is None:
+            unknown = True
+        elif candidate == value:
+            return True
+    return None if unknown else False
+
+
+def _sql_not(value: Value) -> bool | None:
+    """NOT を三値論理で評価する(NULL の否定は NULL)。"""
+    return None if value is None else not value
+
+
+ENV["IN"] = _sql_in
+ENV["NOT"] = _sql_not
+
+# sqlglot が生成する Python 式は、IN を集合の帰属判定 (``x in {...}``)、NOT を
+# Python の ``not`` にそのまま落とす。どちらも NULL を伝播せず、左辺が NULL の
+# IN が偽になり、NOT を通ると真に化ける。三値論理どおりに評価する ENV の関数
+# 呼び出しへ差し替える。
+_IN_AS_SET = PythonGenerator.TRANSFORMS[exp.In]
+
+
+def _in_py(generator: Generator, node: exp.In) -> str:
+    if node_arg(node, "query") is not None:
+        # サブクエリが残る IN は optimizer が join へ展開し損ねた形。値の並びが
+        # 無く畳めないので、sqlglot の生成に任せる。
+        return _IN_AS_SET(generator, node)
+    return f"IN({generator.sql(node, 'this')}, {generator.expressions(node, flat=True)})"
+
+
+PythonGenerator.TRANSFORMS[exp.In] = _in_py
+PythonGenerator.TRANSFORMS[exp.Not] = lambda generator, node: f"NOT({generator.sql(node.this)})"
 
 # executor に渡すスキーマ注釈。date/datetime は ISO 文字列のまま比較するので text
 _SQLGLOT_TYPES = {
@@ -432,10 +482,10 @@ def _fold_not_in(
     x が v に含まれれば偽、どれでもなければ真になる。この関数を呼ぶ位置では
     NULL と偽が同じ結果になる(_negatable_position)ので、NULL は偽に落とす。
 
-    残る形は「値に NULL が無く、x も NULL でない NOT IN」だけになる。この形なら
-    sqlglot が生成する Python の集合の帰属判定と意味が一致する。値の並びを
-    リテラルとして埋め込むのは、合成テーブルへの参照に置き換える書き方が
-    sqlglot の unnest の判定(NOT IN を見送るかどうか)に寄りかかるためである。
+    残る形は「値に NULL が無い NOT IN」だけになる。x が NULL のときの NULL の
+    伝播は IN の評価(_sql_in)が受け持つ。値の並びをリテラルとして埋め込むのは、
+    合成テーブルへの参照に置き換える書き方が sqlglot の unnest の判定
+    (NOT IN を見送るかどうか)に寄りかかるためである。
     """
     if len(columns) != 1:
         raise NotSupportedError(
@@ -449,14 +499,8 @@ def _fold_not_in(
     if any(value is None for value in values):
         negation.replace(exp.false())
         return
-    left = in_node.this
     literals = [exp.convert(value) for value in dict.fromkeys(values)]
-    negation.replace(
-        exp.and_(
-            exp.Not(this=exp.Is(this=left.copy(), expression=exp.Null())),
-            exp.Not(this=exp.In(this=left.copy(), expressions=literals)),
-        )
-    )
+    negation.replace(exp.Not(this=exp.In(this=in_node.this.copy(), expressions=literals)))
 
 
 def _not_in_predicate(node: exp.Expression) -> tuple[exp.In, exp.Not] | None:

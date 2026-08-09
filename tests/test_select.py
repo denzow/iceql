@@ -295,6 +295,51 @@ class TestNotInAndExists:
         assert rows == [(1,), (2,), (4,)]
 
 
+class TestLiteralInThreeValuedLogic:
+    """リテラルの並びに対する IN / NOT IN の NULL の扱い。"""
+
+    def test_not_in_skips_null_on_the_left(self, conn):
+        # age が NULL の bob は NOT IN が NULL になるので WHERE を通らない
+        rows = q(conn, "SELECT id FROM users WHERE age NOT IN (30, 35) ORDER BY id")
+        assert rows == [(3,)]
+
+    def test_not_in_with_null_in_the_values(self, conn):
+        assert q(conn, "SELECT id FROM users WHERE age NOT IN (30, NULL)") == []
+
+    def test_in_with_null_in_the_values(self, conn):
+        rows = q(conn, "SELECT id FROM users WHERE age IN (25, NULL) ORDER BY id")
+        assert rows == [(3,)]
+
+    def test_null_on_the_left_projects_null(self, conn):
+        rows = q(conn, "SELECT id, age IN (30, 35), age NOT IN (30, 35) FROM users ORDER BY id")
+        assert rows == [
+            (1, True, False),
+            (2, None, None),
+            (3, False, True),
+            (4, True, False),
+        ]
+
+    def test_parenthesized_not_in(self, conn):
+        rows = q(conn, "SELECT id FROM users WHERE NOT (age IN (30, 35)) ORDER BY id")
+        assert rows == [(3,)]
+
+    def test_not_in_under_or(self, conn):
+        rows = q(conn, "SELECT id FROM users WHERE age NOT IN (30) OR name = 'bob' ORDER BY id")
+        assert rows == [(2,), (3,), (4,)]
+
+    def test_not_in_inside_case(self, conn):
+        rows = q(
+            conn,
+            "SELECT id, CASE WHEN age NOT IN (30) THEN 'y' ELSE 'n' END FROM users ORDER BY id",
+        )
+        assert rows == [(1, "n"), (2, "n"), (3, "y"), (4, "y")]
+
+    def test_not_propagates_null_from_other_predicates(self, conn):
+        # NOT は IN 以外でも NULL を伝播する(joined が NULL の carol は通らない)
+        rows = q(conn, "SELECT id FROM users WHERE NOT (joined LIKE '2020%') ORDER BY id")
+        assert rows == [(2,), (4,)]
+
+
 class TestOrderByNulls:
     def test_asc_nulls_first(self, conn):
         # SQLite と同じ既定: ASC は NULL が先頭

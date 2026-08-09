@@ -19,6 +19,12 @@ DML_CASES = [
     ["UPDATE t SET score = 0.0 WHERE score IS NULL"],
     ["UPDATE t SET score = score * 2 WHERE score IS NOT NULL"],
     ["UPDATE t SET tag = 'w', score = NULL WHERE id IN (1, 3)"],
+    # リテラルの並びに対する IN / NOT IN(NULL 混じりの行を巻き込む形)
+    ["DELETE FROM t WHERE tag NOT IN ('x')"],
+    ["DELETE FROM t WHERE tag IN ('x', NULL)"],
+    ["DELETE FROM t WHERE score NOT IN (1.5, NULL)"],
+    ["UPDATE t SET name = name || '!' WHERE tag NOT IN ('x', 'y')"],
+    ["UPDATE t SET tag = 'z' WHERE NOT (score IN (1.5))"],
     ["UPDATE t SET name = name || '!' WHERE tag = 'x'"],
     ["DELETE FROM t WHERE tag IS NULL"],
     ["DELETE FROM t WHERE score < 1.0"],
