@@ -104,7 +104,8 @@ conn.close()
 - SELECT：WHERE、JOIN（INNER / LEFT）、GROUP BY、集約関数、HAVING、ORDER BY（NULLS FIRST / LAST 対応）、LIMIT / OFFSET、DISTINCT、IN サブクエリ、CTE（WITH）、UNION / UNION ALL
 - DML：INSERT（VALUES / SELECT）、UPDATE、DELETE
 - DDL：CREATE TABLE、DROP TABLE、ALTER TABLE（ADD / DROP / RENAME COLUMN、RENAME TO）
-- トランザクション：BEGIN / COMMIT / ROLLBACK（変更はメモリに溜まり、COMMIT で一括書き出し。DDL はトランザクション内では使えない）。
+- トランザクション：BEGIN / COMMIT / ROLLBACK（変更はメモリに溜まり、COMMIT で一括書き出し）。
+  DDL もトランザクション内で使えるため、スキーマ変更とそれに伴うデータ移行を 1 つの単位でコミットできる。
   書き手同士は直列化される。BEGIN は DB 全体の書き込みロックを COMMIT / ROLLBACK まで保持し、後発の書き手はその解放を待つ（`connect(timeout=...)` 秒を超えると `OperationalError`）。
   SELECT は開いているトランザクションにブロックされず、COMMIT の書き出し中だけ瞬間的に待つ。
   COMMIT はクラッシュ耐性を持つ。ステージ内容を先に redo ジャーナルへ書いてからテーブルを置換するため、途中でクラッシュしても次にデータベースを開いたときにコミットが自動で完成する

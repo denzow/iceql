@@ -104,7 +104,7 @@ conn.close()
 - SELECT: WHERE, JOIN (INNER / LEFT), GROUP BY, aggregate functions, HAVING, ORDER BY (with NULLS FIRST / LAST), LIMIT / OFFSET, DISTINCT, IN subqueries, CTE (WITH), UNION / UNION ALL
 - DML: INSERT (VALUES / SELECT), UPDATE, DELETE
 - DDL: CREATE TABLE, DROP TABLE, ALTER TABLE (ADD / DROP / RENAME COLUMN, RENAME TO)
-- Transactions: BEGIN / COMMIT / ROLLBACK (changes are staged in memory and flushed on COMMIT; DDL is not allowed inside a transaction). Writers are serialized: BEGIN takes a database-wide write lock held until COMMIT / ROLLBACK, and other writers wait for it (up to `connect(timeout=...)` seconds, then `OperationalError`). SELECTs are never blocked by an open transaction — they only wait during the brief COMMIT flush. COMMITs are crash-safe: staged changes are first written to a redo journal, and an interrupted COMMIT is completed automatically the next time the database is opened
+- Transactions: BEGIN / COMMIT / ROLLBACK (changes are staged in memory and flushed on COMMIT). DDL is allowed inside a transaction, so a schema change and the data migration that goes with it commit as one unit. Writers are serialized: BEGIN takes a database-wide write lock held until COMMIT / ROLLBACK, and other writers wait for it (up to `connect(timeout=...)` seconds, then `OperationalError`). SELECTs are never blocked by an open transaction — they only wait during the brief COMMIT flush. COMMITs are crash-safe: staged changes are first written to a redo journal, and an interrupted COMMIT is completed automatically the next time the database is opened
 - Placeholders: `?` (qmark) and `:name` (named)
 
 SQL parsing and SELECT execution are powered by [sqlglot](https://github.com/tobymao/sqlglot).

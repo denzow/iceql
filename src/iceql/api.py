@@ -10,7 +10,7 @@ from typing import Any
 from sqlglot import exp
 
 from iceql import journal
-from iceql.catalog import init_database
+from iceql.catalog import Catalog, init_database
 from iceql.engine import StatementResult, execute_statement, parse_statement
 from iceql.errors import InterfaceError, ProgrammingError
 from iceql.staging import StagedCatalog
@@ -157,6 +157,15 @@ class Connection:
     def in_transaction(self) -> bool:
         return self._staged is not None
 
+    @property
+    def _active_catalog(self) -> Catalog:
+        """トランザクション中はステージ、それ以外はディスクのカタログ。
+
+        トランザクション内の DDL は COMMIT までディスクに現れないため、
+        テーブル一覧やスキーマの参照もこちらを通す。
+        """
+        return self._staged if self._staged is not None else self._catalog
+
     def _execute_ast(self, ast: exp.Expression) -> StatementResult:
         # 他プロセスのクラッシュで残ったコミットジャーナルがあれば先に再適用する
         journal.recover_if_needed(self._catalog, self._lock)
@@ -173,8 +182,7 @@ class Connection:
                 raise ProgrammingError("cannot ROLLBACK: no transaction is active")
             self.rollback()
             return StatementResult()
-        catalog = self._staged if self._staged is not None else self._catalog
-        return execute_statement(catalog, self._lock, ast)
+        return execute_statement(self._active_catalog, self._lock, ast)
 
     def _begin(self) -> None:
         if self.in_transaction:

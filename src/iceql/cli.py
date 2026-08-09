@@ -16,6 +16,7 @@ import iceql
 from iceql.catalog import init_database
 from iceql.engine import SQL_DIALECT, StatementResult
 from iceql.errors import Error, ProgrammingError
+from iceql.schema import dump_schema
 from iceql.types import NULL_MARKER, Value
 
 FORMATS = ("table", "csv", "json")
@@ -264,7 +265,7 @@ def _print_backslash_help() -> None:
 
 
 def _list_tables(conn: iceql.Connection) -> None:
-    tables = conn._catalog.list_tables()
+    tables = conn._active_catalog.list_tables()
     if not tables:
         click.echo("No tables found.")
         return
@@ -284,10 +285,11 @@ def _run_backslash(conn: iceql.Connection, line: str, state: _ReplState) -> None
     elif cmd in ("\\d", "\\dt"):
         if cmd == "\\d" and args:
             try:
-                path = conn._catalog.schema_path(args[0])
-                click.echo(path.read_text(encoding="utf-8"), nl=False)
+                schema = conn._active_catalog.load_schema(args[0])
             except (Error, OSError):
                 click.echo(f'Did not find any table named "{args[0]}".', err=True)
+            else:
+                click.echo(dump_schema(schema), nl=False)
         else:
             _list_tables(conn)
     elif cmd == "\\x":

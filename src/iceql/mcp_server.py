@@ -14,6 +14,7 @@ from sqlglot import exp
 import iceql
 from iceql.engine import parse_statement
 from iceql.errors import ProgrammingError
+from iceql.schema import dump_schema
 
 _READ_ONLY_TYPES = (exp.Select, exp.Union, exp.Except, exp.Intersect)
 
@@ -38,13 +39,12 @@ def execute_tool(conn: iceql.Connection, sql: str) -> dict[str, Any]:
 
 
 def list_tables_tool(conn: iceql.Connection) -> list[str]:
-    return conn._catalog.list_tables()
+    return conn._active_catalog.list_tables()
 
 
 def describe_table_tool(conn: iceql.Connection, table: str) -> str:
     """テーブルのスキーマ(YAML)を返す。"""
-    conn._catalog.load_schema(table)  # 存在チェック
-    return conn._catalog.schema_path(table).read_text(encoding="utf-8")
+    return dump_schema(conn._active_catalog.load_schema(table))  # 無ければ ProgrammingError
 
 
 def create_server(dbdir: str | Path, *, read_only: bool = False) -> Any:
