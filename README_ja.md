@@ -85,6 +85,41 @@ mydb=# \q
 `iceql check mydb` はスキーマと CSV の整合性（型、NOT NULL、主キー重複、正規形）を検証し、問題があれば非ゼロで終了する。
 手編集した CSV の検証を CI や pre-commit に組み込める。
 
+## CSV の取り込み
+
+`iceql import` は手元の CSV をテーブルにする。
+列名はヘッダ行から取り、型は全行を走査して推論する。
+推論結果は書き込みの前に表示される。
+
+```console
+$ iceql import mydb users.csv
+users.csv: 2 rows, 3 columns -> table 'users'
+  id    integer  not null
+  name  text     not null
+  age   integer  null
+imported 2 rows into users
+```
+
+```console
+$ iceql import mydb users.csv --table people    # テーブル名（既定はファイル名）
+$ iceql import mydb users.csv --types zip=text  # 推論の上書き（繰り返し可）
+$ iceql import mydb users.csv --dry-run         # 推論結果だけ表示して終了
+$ cat users.csv | iceql import mydb - --table users
+```
+
+型は「読んで書き戻したときに表記が変わらない」場合にだけ推論する。
+ゼロ埋めの `007` が黙って `7` にならず `text` のまま残るのはこのためである。
+整数と小数が混ざった列は `real` になり、どれにも当てはまらない列は情報を落とさない `text` になる。
+推論が意図と違うときは `--types` で上書きする。
+
+NULL の規約は iceql の他の入出力と同じで、クォートされていない `\N` が NULL、空フィールドは空文字列である。
+空フィールドを NULL とする CSV では `--null-marker ''` を渡す（`--null-marker NA` のような指定もできる）。
+UTF-8 でないファイルは `--encoding`（既定は `utf-8-sig`）で読む。
+
+nullable になるのは実際に NULL を含む列だけで、主キーは推論しない。
+既存のテーブルへの取り込みはエラーになる。
+推論結果が意図と違えば、生成された `<table>.schema.yaml` を手で直せばよい。
+
 ## Python API
 
 sqlite3 モジュールと同じ感覚で使える DB-API 2.0 ライクな API を持つ。

@@ -13,6 +13,7 @@ import sqlglot
 from sqlglot.errors import ParseError
 
 import iceql
+from iceql import importer
 from iceql.catalog import init_database
 from iceql.engine import SQL_DIALECT, StatementResult
 from iceql.errors import Error, ProgrammingError
@@ -326,6 +327,65 @@ def init(dbdir: Path) -> None:
     """Create an empty database directory."""
     catalog = init_database(dbdir)
     click.echo(f"initialized empty database at {catalog.root}")
+
+
+@main.command("import")
+@click.argument("dbdir", type=click.Path(path_type=Path))
+@click.argument("csvfile", type=click.Path(path_type=Path, allow_dash=True))
+@click.option("--table", default=None, help="Table name (default: the CSV file name)")
+@click.option(
+    "--types",
+    multiple=True,
+    metavar="COL=TYPE",
+    help="Override the inferred type of a column (repeatable)",
+)
+@click.option(
+    "--null-marker",
+    default=NULL_MARKER,
+    show_default=True,
+    help="Field value read as NULL",
+)
+@click.option(
+    "--encoding",
+    default=importer.DEFAULT_ENCODING,
+    show_default=True,
+    help="Encoding of the input CSV",
+)
+@click.option("--dry-run", is_flag=True, help="Show the inferred schema without writing")
+def import_(
+    dbdir: Path,
+    csvfile: Path,
+    table: str | None,
+    types: tuple[str, ...],
+    null_marker: str,
+    encoding: str,
+    dry_run: bool,
+) -> None:
+    """Import CSVFILE into DBDIR as a new table.
+
+    Column names come from the header row and types are inferred from every row.
+    Pass - as CSVFILE to read from standard input.
+    """
+    try:
+        plan = importer.build_plan(
+            csvfile,
+            table=table,
+            types=importer.parse_type_overrides(types),
+            null_marker=null_marker,
+            encoding=encoding,
+        )
+    except Error as exc:
+        raise click.ClickException(str(exc)) from exc
+    # 推論結果は書き込みの前に見せる
+    click.echo(importer.format_plan(plan), nl=False, err=True)
+    if dry_run:
+        click.echo("dry run: no changes written", err=True)
+        return
+    try:
+        importer.apply_plan(dbdir, plan)
+    except Error as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"imported {len(plan.rows)} rows into {plan.table}", err=True)
 
 
 @main.command()

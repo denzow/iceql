@@ -85,6 +85,32 @@ Meta commands: `\d [table]` (list / describe tables), `\x` (toggle expanded outp
 `iceql check mydb` validates schema/CSV consistency (types, NOT NULL, duplicate primary keys, canonical form) and exits non-zero on errors.
 This makes hand-edited CSV files verifiable in CI or a pre-commit hook.
 
+## Importing CSV
+
+`iceql import` turns an existing CSV file into a table. Column names come from the header row, and types are inferred by scanning every row. The inferred schema is printed before anything is written.
+
+```console
+$ iceql import mydb users.csv
+users.csv: 2 rows, 3 columns -> table 'users'
+  id    integer  not null
+  name  text     not null
+  age   integer  null
+imported 2 rows into users
+```
+
+```console
+$ iceql import mydb users.csv --table people    # table name (default: the file name)
+$ iceql import mydb users.csv --types zip=text  # override the inferred type (repeatable)
+$ iceql import mydb users.csv --dry-run         # show the inferred schema and stop
+$ cat users.csv | iceql import mydb - --table users
+```
+
+A type is only inferred when reading a value and writing it back leaves the text unchanged, so a zero-padded `007` stays `text` instead of silently becoming `7`. A column holding both integers and decimals becomes `real`. Anything else falls back to `text`, which loses nothing; `--types` overrides the result.
+
+NULL follows the same convention as everywhere else in iceql: an unquoted `\N` is NULL and an empty field is the empty string. For CSV files where an empty field means NULL, pass `--null-marker ''` (or `--null-marker NA`, and so on). `--encoding` (default `utf-8-sig`) reads files that are not UTF-8.
+
+A column is nullable only when it actually contains a NULL, primary keys are not inferred, and importing into an existing table is an error. When the inference does not match your intent, edit the generated `<table>.schema.yaml`.
+
 ## Python API
 
 A DB-API 2.0 style API, familiar to anyone who has used the sqlite3 module.
