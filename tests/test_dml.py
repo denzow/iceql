@@ -163,6 +163,201 @@ class TestInsert:
         assert row == (date.today().isoformat(),)
 
 
+class TestInsertConflict:
+    @pytest.fixture
+    def stock(self, conn):
+        """在庫表。主キーのほかに UNIQUE と CHECK を 1 つずつ持つ。"""
+        conn.execute(
+            "CREATE TABLE stock (id INTEGER PRIMARY KEY, code TEXT UNIQUE, "
+            "qty INTEGER NOT NULL CHECK (qty >= 0))"
+        )
+        conn.execute("INSERT INTO stock VALUES (1, 'a', 10), (2, 'b', 20)")
+        return conn
+
+    def test_or_ignore_skips_the_conflicting_row(self, stock):
+        cur = stock.execute("INSERT OR IGNORE INTO stock VALUES (1, 'z', 1), (3, 'c', 5)")
+        assert cur.rowcount == 1
+        assert all_rows(stock, "stock") == [(1, "a", 10), (2, "b", 20), (3, "c", 5)]
+
+    def test_or_ignore_skips_not_null_and_check_violations(self, stock):
+        cur = stock.execute(
+            "INSERT OR IGNORE INTO stock VALUES (3, 'c', NULL), (4, 'd', -1), (5, 'e', 5)"
+        )
+        assert cur.rowcount == 1
+        assert all_rows(stock, "stock")[-1] == (5, "e", 5)
+
+    def test_or_ignore_skips_a_unique_conflict(self, stock):
+        cur = stock.execute("INSERT OR IGNORE INTO stock VALUES (3, 'a', 5)")
+        assert cur.rowcount == 0
+        assert len(all_rows(stock, "stock")) == 2
+
+    def test_or_replace_overwrites_the_existing_row(self, stock):
+        cur = stock.execute("INSERT OR REPLACE INTO stock VALUES (1, 'z', 99)")
+        assert cur.rowcount == 1
+        assert cur.lastrowid == 1
+        assert all_rows(stock, "stock") == [(1, "z", 99), (2, "b", 20)]
+
+    def test_or_replace_drops_every_conflicting_row(self, stock):
+        # 主キーで 1 行、UNIQUE で別の 1 行に当たるので、どちらも消えて 1 行になる
+        cur = stock.execute("INSERT OR REPLACE INTO stock VALUES (1, 'b', 7)")
+        assert cur.rowcount == 1
+        assert all_rows(stock, "stock") == [(1, "b", 7)]
+
+    def test_or_replace_keeps_the_row_position(self, stock):
+        stock.execute("INSERT OR REPLACE INTO stock VALUES (1, 'z', 99)")
+        csv = (stock._catalog.root / "stock.csv").read_text()
+        assert csv.splitlines()[1] == "1,z,99"
+
+    def test_or_replace_still_fails_on_check(self, stock):
+        with pytest.raises(IntegrityError, match="CHECK"):
+            stock.execute("INSERT OR REPLACE INTO stock VALUES (1, 'a', -1)")
+
+    def test_do_nothing_keeps_the_existing_row(self, stock):
+        cur = stock.execute(
+            "INSERT INTO stock VALUES (1, 'z', 99) ON CONFLICT(id) DO NOTHING"
+        )
+        assert cur.rowcount == 0
+        assert all_rows(stock, "stock") == [(1, "a", 10), (2, "b", 20)]
+
+    def test_do_nothing_without_a_target(self, stock):
+        cur = stock.execute("INSERT INTO stock VALUES (3, 'a', 9) ON CONFLICT DO NOTHING")
+        assert cur.rowcount == 0
+        assert len(all_rows(stock, "stock")) == 2
+
+    def test_do_nothing_reports_a_violation_outside_the_target(self, stock):
+        # 主キーは空いているが、対象外の UNIQUE に当たるのでエラーになる
+        with pytest.raises(IntegrityError, match="stock.code"):
+            stock.execute(
+                "INSERT INTO stock VALUES (3, 'a', 9) ON CONFLICT(id) DO NOTHING"
+            )
+
+    def test_do_update_uses_excluded(self, stock):
+        cur = stock.execute(
+            "INSERT INTO stock VALUES (1, 'a', 5) "
+            "ON CONFLICT(id) DO UPDATE SET qty = stock.qty + excluded.qty"
+        )
+        assert cur.rowcount == 1
+        assert all_rows(stock, "stock")[0] == (1, "a", 15)
+
+    def test_do_update_defaults_to_the_target_row(self, stock):
+        stock.execute(
+            "INSERT INTO stock VALUES (1, 'a', 5) "
+            "ON CONFLICT(id) DO UPDATE SET qty = qty * 2"
+        )
+        assert all_rows(stock, "stock")[0] == (1, "a", 20)
+
+    def test_do_update_on_a_unique_target(self, stock):
+        stock.execute(
+            "INSERT INTO stock VALUES (9, 'b', 1) "
+            "ON CONFLICT(code) DO UPDATE SET qty = excluded.qty"
+        )
+        assert all_rows(stock, "stock") == [(1, "a", 10), (2, "b", 1)]
+
+    def test_do_update_where_false_changes_nothing(self, stock):
+        cur = stock.execute(
+            "INSERT INTO stock VALUES (1, 'a', 5) "
+            "ON CONFLICT(id) DO UPDATE SET qty = 0 WHERE stock.qty < 5"
+        )
+        assert cur.rowcount == 0
+        assert all_rows(stock, "stock")[0] == (1, "a", 10)
+
+    def test_do_update_inserts_when_there_is_no_conflict(self, stock):
+        cur = stock.execute(
+            "INSERT INTO stock VALUES (3, 'c', 5) ON CONFLICT(id) DO UPDATE SET qty = 0"
+        )
+        assert cur.rowcount == 1
+        assert all_rows(stock, "stock")[-1] == (3, "c", 5)
+
+    def test_do_update_checks_the_updated_row(self, stock):
+        with pytest.raises(IntegrityError, match="CHECK"):
+            stock.execute(
+                "INSERT INTO stock VALUES (1, 'a', 5) "
+                "ON CONFLICT(id) DO UPDATE SET qty = -1"
+            )
+
+    def test_do_update_reports_a_new_unique_violation(self, stock):
+        with pytest.raises(IntegrityError, match="stock.code"):
+            stock.execute(
+                "INSERT INTO stock VALUES (1, 'a', 5) "
+                "ON CONFLICT(id) DO UPDATE SET code = 'b'"
+            )
+
+    def test_later_values_see_the_earlier_result(self, stock):
+        cur = stock.execute(
+            "INSERT INTO stock VALUES (3, 'c', 1), (3, 'c', 2) "
+            "ON CONFLICT(id) DO UPDATE SET qty = stock.qty + excluded.qty"
+        )
+        assert cur.rowcount == 2
+        assert all_rows(stock, "stock")[-1] == (3, "c", 3)
+
+    def test_skipped_rows_do_not_consume_the_counter(self, stock):
+        stock.execute("INSERT OR IGNORE INTO stock (code, qty) VALUES ('a', 1), ('d', 1)")
+        assert all_rows(stock, "stock")[-1] == (3, "d", 1)
+
+    def test_conflict_target_must_match_a_constraint(self, stock):
+        with pytest.raises(ProgrammingError, match="ON CONFLICT clause"):
+            stock.execute(
+                "INSERT INTO stock VALUES (3, 'c', 1) ON CONFLICT(qty) DO NOTHING"
+            )
+
+    def test_composite_conflict_target_must_match_as_a_whole(self, stock):
+        with pytest.raises(ProgrammingError, match="ON CONFLICT clause"):
+            stock.execute(
+                "INSERT INTO stock VALUES (3, 'c', 1) ON CONFLICT(id, code) DO NOTHING"
+            )
+
+    def test_do_update_without_set_is_rejected(self, stock):
+        with pytest.raises(ProgrammingError, match="SET"):
+            stock.execute("INSERT INTO stock VALUES (1, 'z', 1) ON CONFLICT(id) DO UPDATE")
+
+    def test_or_rollback_is_rejected(self, stock):
+        with pytest.raises(NotSupportedError, match="OR ROLLBACK"):
+            stock.execute("INSERT OR ROLLBACK INTO stock VALUES (1, 'z', 1)")
+
+    def test_or_abort_still_fails_on_a_conflict(self, stock):
+        with pytest.raises(IntegrityError, match="UNIQUE"):
+            stock.execute("INSERT OR ABORT INTO stock VALUES (1, 'z', 1)")
+
+    def test_replace_into_is_rejected(self, stock):
+        with pytest.raises(NotSupportedError):
+            stock.execute("REPLACE INTO stock VALUES (1, 'z', 1)")
+
+    def test_composite_unique_as_a_target(self, conn):
+        conn.execute(
+            "CREATE TABLE pairs (id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, "
+            "n INTEGER, UNIQUE (a, b))"
+        )
+        conn.execute("INSERT INTO pairs VALUES (1, 1, 1, 5)")
+        conn.execute(
+            "INSERT INTO pairs VALUES (2, 1, 1, 7) "
+            "ON CONFLICT(b, a) DO UPDATE SET n = excluded.n"
+        )
+        assert all_rows(conn, "pairs") == [(1, 1, 1, 7)]
+
+    def test_null_keys_never_conflict(self, conn):
+        conn.execute("CREATE TABLE opt (id INTEGER PRIMARY KEY, code TEXT UNIQUE)")
+        conn.execute("INSERT INTO opt VALUES (1, NULL)")
+        cur = conn.execute("INSERT OR IGNORE INTO opt VALUES (2, NULL)")
+        assert cur.rowcount == 1
+        assert all_rows(conn, "opt") == [(1, None), (2, None)]
+
+    def test_executemany_upsert(self, stock):
+        cur = stock.executemany(
+            "INSERT INTO stock VALUES (?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET qty = excluded.qty",
+            [(1, "a", 1), (3, "c", 2)],
+        )
+        assert cur.rowcount == 2
+        assert all_rows(stock, "stock") == [(1, "a", 1), (2, "b", 20), (3, "c", 2)]
+
+    def test_insert_select_with_conflict(self, stock):
+        cur = stock.execute(
+            "INSERT OR IGNORE INTO stock SELECT id, code, qty FROM stock"
+        )
+        assert cur.rowcount == 0
+        assert len(all_rows(stock, "stock")) == 2
+
+
 class TestAutoIncrement:
     def test_omitted_pk_is_assigned(self, conn):
         conn.execute("INSERT INTO depts (dept) VALUES ('hr')")

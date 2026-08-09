@@ -117,3 +117,65 @@ def test_constraint_violations_match_sqlite(tmp_path, sql):
     assert actual == expected
     lite.close()
     ice.close()
+
+
+CONFLICT_CASES = [
+    # 競合しない行は競合解決の指定があっても普通に入る
+    "INSERT OR IGNORE INTO c VALUES (4, 'z', 1, 2, 2)",
+    "INSERT OR REPLACE INTO c VALUES (4, 'z', 1, 2, 2)",
+    "INSERT INTO c VALUES (4, 'z', 1, 2, 2) ON CONFLICT(id) DO UPDATE SET n = 9",
+    # 主キーの競合
+    "INSERT OR IGNORE INTO c VALUES (1, 'z', 9, 2, 2)",
+    "INSERT OR REPLACE INTO c VALUES (1, 'z', 9, 2, 2)",
+    "INSERT INTO c VALUES (1, 'z', 9, 2, 2) ON CONFLICT(id) DO NOTHING",
+    "INSERT INTO c VALUES (1, 'z', 9, 2, 2) ON CONFLICT DO NOTHING",
+    "INSERT INTO c VALUES (1, 'z', 9, 2, 2) ON CONFLICT(id) DO UPDATE SET n = excluded.n",
+    "INSERT INTO c VALUES (1, 'z', 9, 2, 2) ON CONFLICT(id) DO UPDATE SET n = n + excluded.n",
+    "INSERT INTO c VALUES (1, 'z', 9, 2, 2) ON CONFLICT(id) DO UPDATE SET n = 9 WHERE c.n > 1",
+    "INSERT INTO c VALUES (1, 'z', 9, 2, 2) ON CONFLICT(id) DO UPDATE SET n = 9 WHERE c.n = 1",
+    # UNIQUE 列と複合 UNIQUE の競合
+    "INSERT OR IGNORE INTO c VALUES (4, 'x', 9, 2, 2)",
+    "INSERT OR REPLACE INTO c VALUES (4, 'x', 9, 2, 2)",
+    "INSERT INTO c VALUES (4, 'x', 9, 2, 2) ON CONFLICT(e) DO UPDATE SET n = excluded.n",
+    "INSERT INTO c VALUES (4, 'z', 9, 1, 1) ON CONFLICT(a, b) DO UPDATE SET n = excluded.n",
+    # 対象外の制約に当たる / 主キーと UNIQUE の両方に当たる
+    "INSERT INTO c VALUES (4, 'x', 9, 2, 2) ON CONFLICT(id) DO NOTHING",
+    "INSERT OR REPLACE INTO c VALUES (1, 'y', 9, 2, 2)",
+    "INSERT INTO c VALUES (1, 'z', 9, 2, 2) ON CONFLICT(id) DO UPDATE SET e = 'y'",
+    # CHECK 違反は OR IGNORE だけが飛ばす
+    "INSERT OR IGNORE INTO c VALUES (4, 'z', 0, 2, 2)",
+    "INSERT INTO c VALUES (1, 'z', 0, 2, 2) ON CONFLICT(id) DO NOTHING",
+    "INSERT INTO c VALUES (1, 'z', 9, 2, 2) ON CONFLICT(id) DO UPDATE SET n = 0",
+    # 複数行、同じ文の中での競合、自動採番との組み合わせ
+    "INSERT OR IGNORE INTO c VALUES (1, 'z', 9, 2, 2), (4, 'w', 9, 3, 3)",
+    "INSERT OR REPLACE INTO c VALUES (4, 'x', 9, 2, 2), (4, 'x', 8, 2, 2)",
+    "INSERT INTO c VALUES (4, 'w', 9, 3, 3), (4, 'v', 8, 4, 4) "
+    "ON CONFLICT(id) DO UPDATE SET n = n + excluded.n",
+    "INSERT OR IGNORE INTO c (e, n) VALUES ('x', 1), ('w', 1)",
+    "INSERT INTO c (e, n) VALUES ('x', 1) ON CONFLICT(e) DO UPDATE SET n = 5",
+]
+
+
+@pytest.mark.parametrize("sql", CONFLICT_CASES)
+def test_insert_conflict_matches_sqlite(tmp_path, sql):
+    lite = sqlite3.connect(":memory:")
+    ice = iceql.connect(tmp_path / "db")
+    for setup in CONSTRAINT_SETUP:
+        lite.execute(setup)
+        ice.execute(setup)
+
+    try:
+        expected_count = lite.execute(sql).rowcount
+    except sqlite3.IntegrityError:
+        expected_count = None
+    try:
+        actual_count = ice.execute(sql).rowcount
+    except IntegrityError:
+        actual_count = None
+    assert actual_count == expected_count, sql
+
+    expected = lite.execute("SELECT * FROM c ORDER BY id").fetchall()
+    actual = ice.execute("SELECT * FROM c ORDER BY id").fetchall()
+    assert actual == expected
+    lite.close()
+    ice.close()
