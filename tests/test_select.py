@@ -259,6 +259,49 @@ class TestNotInAndExists:
             (2,)
         ]
 
+    def test_not_in_inside_case(self, conn):
+        rows = q(
+            conn,
+            "SELECT id, CASE WHEN id NOT IN (SELECT id FROM depts) THEN 1 ELSE 0 END "
+            "FROM users ORDER BY id",
+        )
+        assert rows == [(1, 0), (2, 0), (3, 1), (4, 1)]
+
+    def test_not_in_inside_case_with_null_in_the_values(self, conn):
+        # 値に NULL があると NOT IN は NULL になり、CASE の ELSE に落ちる
+        rows = q(
+            conn,
+            "SELECT id, CASE WHEN id NOT IN (SELECT dept_id FROM users) THEN 1 ELSE 0 END "
+            "FROM users ORDER BY id",
+        )
+        assert rows == [(1, 0), (2, 0), (3, 0), (4, 0)]
+
+    def test_double_negated_not_in_subquery(self, conn):
+        # NOT (x NOT IN ...) は NULL を伝播するので、二重の否定でも IN と一致する
+        rows = q(
+            conn,
+            "SELECT id FROM users WHERE NOT (id NOT IN (SELECT id FROM depts)) ORDER BY id",
+        )
+        assert rows == [(1,), (2,)]
+
+    def test_not_in_in_the_projection(self, conn):
+        rows = q(conn, "SELECT id, id NOT IN (SELECT id FROM depts) FROM users ORDER BY id")
+        assert rows == [(1, False), (2, False), (3, True), (4, True)]
+
+    def test_not_in_in_the_projection_with_null(self, conn):
+        # 値の NULL(carol の dept_id)も左辺の NULL も NULL として現れる
+        rows = q(
+            conn,
+            "SELECT id, id NOT IN (SELECT dept_id FROM users), "
+            "dept_id NOT IN (SELECT id FROM depts WHERE id = 1) FROM users ORDER BY id",
+        )
+        assert rows == [
+            (1, False, False),
+            (2, False, True),
+            (3, None, None),
+            (4, None, False),
+        ]
+
     def test_exists_uncorrelated(self, conn):
         rows = q(conn, "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM depts) ORDER BY id")
         assert rows == [(1,), (2,), (3,), (4,)]
@@ -487,20 +530,6 @@ class TestErrors:
         with pytest.raises(NotSupportedError, match="multi-column subquery"):
             conn.execute(
                 "SELECT id FROM users WHERE (id, name) NOT IN (SELECT id, dept FROM depts)"
-            )
-
-    def test_not_in_outside_boolean_context_clear_error(self, conn):
-        # CASE の中では NULL と偽が別の結果になるので、NULL を偽に落とせない
-        with pytest.raises(NotSupportedError, match="only supported in WHERE"):
-            conn.execute(
-                "SELECT id FROM users "
-                "WHERE CASE WHEN id NOT IN (SELECT id FROM depts) THEN 1 ELSE 0 END = 1"
-            )
-
-    def test_double_negated_in_subquery_clear_error(self, conn):
-        with pytest.raises(NotSupportedError, match="only supported in WHERE"):
-            conn.execute(
-                "SELECT id FROM users WHERE NOT (id NOT IN (SELECT id FROM depts))"
             )
 
     def test_limit_in_correlated_subquery_clear_error(self, conn):

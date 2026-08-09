@@ -155,6 +155,18 @@ SELECT_QUERIES = [
     "SELECT COUNT(*) FROM users WHERE id NOT IN (SELECT id FROM depts)",
     "SELECT id FROM users WHERE id NOT IN (SELECT id FROM depts ORDER BY id LIMIT 2) "
     "ORDER BY id",
+    # NULL と偽が別の結果になる位置に置いた NOT IN サブクエリ
+    "SELECT id, CASE WHEN id NOT IN (SELECT id FROM depts) THEN 1 ELSE 0 END "
+    "FROM users ORDER BY id",
+    "SELECT id, CASE WHEN id NOT IN (SELECT dept_id FROM users) THEN 1 ELSE 0 END "
+    "FROM users ORDER BY id",
+    "SELECT id FROM users WHERE NOT (id NOT IN (SELECT id FROM depts)) ORDER BY id",
+    "SELECT id FROM users WHERE NOT (id NOT IN (SELECT dept_id FROM users)) ORDER BY id",
+    "SELECT id, id NOT IN (SELECT id FROM depts) FROM users ORDER BY id",
+    "SELECT id, id NOT IN (SELECT dept_id FROM users) FROM users ORDER BY id",
+    "SELECT id, dept_id NOT IN (SELECT id FROM depts WHERE id = 1) FROM users ORDER BY id",
+    "SELECT id, id NOT IN (SELECT id FROM depts WHERE id > 99) FROM users ORDER BY id",
+    "SELECT id FROM users WHERE (id NOT IN (SELECT dept_id FROM users)) IS NULL ORDER BY id",
     "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM depts) ORDER BY id",
     "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM depts WHERE id > 99)",
     "SELECT id FROM users WHERE NOT EXISTS (SELECT 1 FROM depts)",

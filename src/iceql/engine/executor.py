@@ -155,15 +155,30 @@ class _OrderKey:
     nulls_first: bool
 
 
+def _under_not_in(node: exp.Expression, stop: exp.Expression) -> bool:
+    """node が、stop の中の NOT IN サブクエリか、その内側のサブクエリか。
+
+    NOT IN のサブクエリは rewrite_subqueries が単体で評価して値に畳むので、
+    射影に置かれていてもスカラサブクエリとしては扱わない。
+    """
+    current: exp.Expression | None = node
+    while current is not None and current is not stop:
+        if _not_in_predicate(current) is not None:
+            return True
+        current = cast("exp.Expression | None", current.parent)
+    return False
+
+
 def _precheck(ast: exp.Expression) -> None:
     if ast.find(exp.Window):
         raise NotSupportedError("window functions are not supported")
     for select in ast.find_all(exp.Select):
         for projection in select.expressions:
-            if projection.find(exp.Select):
-                raise NotSupportedError(
-                    "scalar subqueries in the SELECT list are not supported"
-                )
+            for sub in projection.find_all(exp.Select):
+                if not _under_not_in(sub, projection):
+                    raise NotSupportedError(
+                        "scalar subqueries in the SELECT list are not supported"
+                    )
     for agg in ast.find_all(exp.AggFunc):
         # sqlglot の optimizer が集約内の DISTINCT を黙って落とし誤答になるため拒否する
         if agg.find(exp.Distinct):
@@ -496,13 +511,15 @@ def _fold_not_in(
     """NOT IN を、評価済みのサブクエリの値から三値論理どおりの式に畳む。
 
     ``x NOT IN (v...)`` は、v が空なら真、x か v のどれかが NULL なら NULL、
-    x が v に含まれれば偽、どれでもなければ真になる。この関数を呼ぶ位置では
-    NULL と偽が同じ結果になる(_negatable_position)ので、NULL は偽に落とす。
+    x が v に含まれれば偽、どれでもなければ真になる。値が空のときだけ真に畳み、
+    それ以外は値の並びをそのまま並べた ``NOT (x IN (v...))`` にする。NULL も
+    リテラルとして並びに入れる。NULL の伝播は IN と NOT の評価
+    (_sql_in / _sql_not)が受け持つので、畳んだ式は WHERE 以外の位置でも
+    サブクエリのままの意味と一致する。
 
-    残る形は「値に NULL が無い NOT IN」だけになる。x が NULL のときの NULL の
-    伝播は IN の評価(_sql_in)が受け持つ。値の並びをリテラルとして埋め込むのは、
-    合成テーブルへの参照に置き換える書き方が sqlglot の unnest の判定
-    (NOT IN を見送るかどうか)に寄りかかるためである。
+    値の並びをリテラルとして埋め込むのは、合成テーブルへの参照に置き換える
+    書き方が sqlglot の unnest の判定(NOT IN を見送るかどうか)に寄りかかる
+    ためである。
     """
     if len(columns) != 1:
         raise NotSupportedError(
@@ -512,9 +529,6 @@ def _fold_not_in(
     values = [row[0] for row in rows]
     if not values:
         negation.replace(exp.true())
-        return
-    if any(value is None for value in values):
-        negation.replace(exp.false())
         return
     literals = [exp.convert(value) for value in dict.fromkeys(values)]
     negation.replace(exp.Not(this=exp.In(this=in_node.this.copy(), expressions=literals)))
@@ -539,23 +553,6 @@ def _not_in_predicate(node: exp.Expression) -> tuple[exp.In, exp.Not] | None:
     if not isinstance(negation, exp.Not):
         return None
     return in_node, negation
-
-
-def _negatable_position(node: exp.Expression) -> bool:
-    """述語の NULL を偽に落としてよい位置か。
-
-    WHERE / HAVING / JOIN ON から AND / OR / 括弧だけを辿って届くなら、その
-    述語が NULL でも偽でも行の採否は変わらない。CASE の中や、さらに外側の
-    NOT の下ではこの言い換えが成り立たない。
-    """
-    current = node.parent
-    while current is not None:
-        if isinstance(current, (exp.Where, exp.Having, exp.Join)):
-            return True
-        if not isinstance(current, (exp.And, exp.Or, exp.Paren)):
-            return False
-        current = current.parent
-    return False
 
 
 def _reject_correlated(scope: Scope, clause: str) -> None:
@@ -617,11 +614,6 @@ def rewrite_subqueries(
                     "rewrite it as NOT EXISTS, e.g. "
                     "SELECT t.x FROM t WHERE NOT EXISTS "
                     "(SELECT 1 FROM u WHERE u.x = t.x AND u.k = t.k)"
-                )
-            if not _negatable_position(not_in[1]):
-                raise NotSupportedError(
-                    "NOT IN with a subquery is only supported in WHERE, HAVING "
-                    "and JOIN ON, combined with AND / OR"
                 )
             targets.append(("not_in", node, not_in))
             continue
