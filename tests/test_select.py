@@ -328,14 +328,115 @@ class TestNotInAndExists:
         )
         assert rows == [(3,), (4,)]
 
-    def test_correlated_exists_still_works(self, conn):
-        # 相関 EXISTS は sqlglot の decorrelate が join へ書き換える
+
+class TestCorrelatedExists:
+    """相関 EXISTS。sqlglot の decorrelate が join へ書き換えられる形だけ通る。"""
+
+    def test_correlated_exists(self, conn):
         rows = q(
             conn,
             "SELECT id FROM users u "
             "WHERE EXISTS (SELECT 1 FROM depts d WHERE d.id = u.dept_id) ORDER BY id",
         )
         assert rows == [(1,), (2,), (4,)]
+
+    def test_equality_with_another_comparison(self, conn):
+        # 等値が 1 つあれば、等値でない条件が混ざっていても書き換えられる
+        rows = q(
+            conn,
+            "SELECT id FROM users u WHERE EXISTS "
+            "(SELECT 1 FROM depts d WHERE d.id = u.dept_id AND d.dept > 'a') ORDER BY id",
+        )
+        assert rows == [(1,), (2,), (4,)]
+
+    def test_not_exists_with_another_comparison(self, conn):
+        rows = q(
+            conn,
+            "SELECT id FROM users u WHERE NOT EXISTS "
+            "(SELECT 1 FROM depts d WHERE d.id = u.dept_id AND d.dept > 'e') ORDER BY id",
+        )
+        assert rows == [(3,)]
+
+    def test_correlation_without_equality_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="correlated EXISTS"):
+            q(
+                conn,
+                "SELECT id FROM users u "
+                "WHERE EXISTS (SELECT 1 FROM depts d WHERE d.id > u.dept_id)",
+            )
+
+    def test_not_exists_without_equality_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="correlated EXISTS"):
+            q(
+                conn,
+                "SELECT id FROM users u "
+                "WHERE NOT EXISTS (SELECT 1 FROM depts d WHERE d.id <> u.dept_id)",
+            )
+
+    def test_or_in_the_correlation_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="correlated EXISTS"):
+            q(
+                conn,
+                "SELECT id FROM users u WHERE EXISTS "
+                "(SELECT 1 FROM depts d WHERE d.id = u.dept_id OR d.dept = u.name)",
+            )
+
+    def test_or_beside_the_correlation_is_rejected(self, conn):
+        # 相関していない OR でも decorrelate は書き換えをあきらめる
+        with pytest.raises(NotSupportedError, match="correlated EXISTS"):
+            q(
+                conn,
+                "SELECT id FROM users u WHERE EXISTS (SELECT 1 FROM depts d "
+                "WHERE d.id = u.dept_id AND (d.dept = 'eng' OR d.dept = 'sales'))",
+            )
+
+    def test_between_on_the_outer_column_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="correlated EXISTS"):
+            q(
+                conn,
+                "SELECT id FROM users u "
+                "WHERE EXISTS (SELECT 1 FROM depts d WHERE d.id BETWEEN u.dept_id AND 99)",
+            )
+
+    def test_outer_column_in_the_projection_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="correlated EXISTS"):
+            q(conn, "SELECT id FROM users u WHERE EXISTS (SELECT u.id FROM depts d)")
+
+    def test_outer_column_in_having_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="correlated EXISTS"):
+            q(
+                conn,
+                "SELECT id FROM users u WHERE EXISTS "
+                "(SELECT 1 FROM depts d GROUP BY d.id HAVING COUNT(*) > u.id)",
+            )
+
+    def test_rejected_when_only_one_of_two_is_unnestable(self, conn):
+        with pytest.raises(NotSupportedError, match="correlated EXISTS"):
+            q(
+                conn,
+                "SELECT id FROM users u "
+                "WHERE EXISTS (SELECT 1 FROM depts d WHERE d.id = u.dept_id) "
+                "AND EXISTS (SELECT 1 FROM depts e WHERE e.id > u.id)",
+            )
+
+    def test_the_error_names_the_subquery_and_a_rewrite(self, conn):
+        with pytest.raises(NotSupportedError) as excinfo:
+            q(
+                conn,
+                "SELECT id FROM users u "
+                "WHERE EXISTS (SELECT 1 FROM depts d WHERE d.id > u.dept_id)",
+            )
+        message = str(excinfo.value)
+        assert "depts" in message
+        assert "MAX" in message
+
+    def test_correlated_exists_in_the_join_on_clause_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="correlated EXISTS"):
+            q(
+                conn,
+                "SELECT u.id FROM users u JOIN depts d ON d.id = u.dept_id "
+                "AND EXISTS (SELECT 1 FROM depts e WHERE e.id > u.id)",
+            )
 
 
 class TestLiteralInThreeValuedLogic:

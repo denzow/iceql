@@ -476,6 +476,14 @@ class TestUpdate:
             conn.execute("UPDATE users SET name = 'x' FROM (SELECT 1) s")
         assert all_rows(conn, "users")[0][1] == "alice"
 
+    def test_update_with_unnestable_correlated_exists_is_rejected(self, conn):
+        with pytest.raises(NotSupportedError, match="correlated EXISTS"):
+            conn.execute(
+                "UPDATE users SET name = 'x' "
+                "WHERE EXISTS (SELECT 1 FROM depts d WHERE d.id > users.dept_id)"
+            )
+        assert all_rows(conn, "users")[0][1] == "alice"
+
 
 class TestDelete:
     def test_delete_where(self, conn):
@@ -495,6 +503,21 @@ class TestDelete:
             "DELETE FROM users WHERE dept_id IN (SELECT id FROM depts WHERE dept = 'eng')"
         )
         assert [r[0] for r in all_rows(conn, "users")] == [2, 3]
+
+    def test_delete_with_correlated_exists(self, conn):
+        conn.execute(
+            "DELETE FROM users WHERE EXISTS (SELECT 1 FROM depts d WHERE d.id = users.dept_id)"
+        )
+        assert [r[0] for r in all_rows(conn, "users")] == [3]
+
+    def test_delete_with_unnestable_correlated_exists_is_rejected(self, conn):
+        # SELECT と同じ経路を通るので、書き換えられない相関 EXISTS は DML でも拒否される
+        with pytest.raises(NotSupportedError, match="correlated EXISTS"):
+            conn.execute(
+                "DELETE FROM users "
+                "WHERE EXISTS (SELECT 1 FROM depts d WHERE d.id > users.dept_id)"
+            )
+        assert len(all_rows(conn, "users")) == 4
 
 
 class TestReturning:

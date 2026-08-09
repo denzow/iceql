@@ -176,6 +176,11 @@ SELECT_QUERIES = [
     "WHERE EXISTS (SELECT 1 FROM depts d WHERE d.id = u.dept_id) ORDER BY u.id",
     "SELECT u.id FROM users u "
     "WHERE NOT EXISTS (SELECT 1 FROM depts d WHERE d.id = u.dept_id) ORDER BY u.id",
+    # 相関条件に等値が 1 つあれば、等値でない条件が混ざっていても join へ書き換わる
+    "SELECT u.id FROM users u WHERE EXISTS "
+    "(SELECT 1 FROM depts d WHERE d.id = u.dept_id AND d.dept > 'a') ORDER BY u.id",
+    "SELECT u.id FROM users u WHERE NOT EXISTS "
+    "(SELECT 1 FROM depts d WHERE d.id = u.dept_id AND d.dept > 'e') ORDER BY u.id",
     "WITH grown AS (SELECT * FROM users WHERE age >= 30) SELECT name FROM grown",
     "SELECT id FROM (SELECT id FROM users ORDER BY id LIMIT 2) x ORDER BY id",
     "SELECT id, name FROM (SELECT id, name FROM users ORDER BY id DESC LIMIT 3) x "

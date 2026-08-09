@@ -21,6 +21,10 @@ sqlglot の optimizer が扱えないサブクエリは rewrite_subqueries で�
 
 後ろ 2 つは、残すと sqlglot.executor が誤答や構文エラーを返す。
 
+相関 EXISTS は sqlglot の decorrelate が join へ書き換える。書き換えられない形
+(相関条件に等値が無い、OR がある、など)は EXISTS 式が AST に残り、やはり
+sqlglot.executor が構文エラーを返すので、実行の前に拒否する。
+
 sqlglot.executor は SQL 式を Python 式に落として評価する。IN と NOT は Python の
 集合の帰属判定と ``not`` にそのまま落ちて NULL を伝播しないので、三値論理どおりに
 評価する関数へ差し替える(_sql_in / _sql_not)。NOT LIKE は Like ノードの negate
@@ -46,6 +50,7 @@ from sqlglot.generator import Generator
 from sqlglot.generators.python import PythonGenerator
 from sqlglot.optimizer.qualify import qualify
 from sqlglot.optimizer.scope import Scope, build_scope
+from sqlglot.optimizer.unnest_subqueries import unnest_subqueries
 
 from iceql.catalog import Catalog
 from iceql.engine import SQL_DIALECT, StatementResult, node_arg
@@ -563,6 +568,42 @@ def _reject_correlated(scope: Scope, clause: str) -> None:
     )
 
 
+def _reject_unnestable_exists(ast: exp.Expression) -> None:
+    """sqlglot が join へ書き換えられない相関 EXISTS を、実行の前に拒否する。
+
+    sqlglot の decorrelate は、相関条件が「サブクエリの WHERE に直に置かれた
+    二項比較の連言で、少なくとも 1 つが等値」のときだけ join へ書き換える。
+    等値が無い、OR がある、BETWEEN のような二項でない述語で外側の列を参照する、
+    といった形は書き換えられず、EXISTS 式が AST に残る。sqlglot.executor は
+    EXISTS 式を Python 式に落とせないため、そのまま渡すと生成コードが構文
+    エラーになり、SQL からは追えないエラーだけが返る。
+
+    書き換えられるかどうかの判定は、条件を iceql 側に書き写すのではなく、
+    AST の写しに unnest_subqueries を掛けて EXISTS が残るかどうかで見る。
+    条件を写すと、sqlglot の更新で今まで通っていた形を拒否しかねない。
+    この関数は相関 EXISTS が残っているクエリでしか走らない(非相関 EXISTS は
+    呼び出し元が真偽値へ畳んだあとである)ので、費用は AST 一往復で済む。
+    """
+    if ast.find(exp.Exists) is None:
+        return
+    try:
+        leftover = unnest_subqueries(ast.copy()).find(exp.Exists)
+    except SqlglotError:
+        # 判定そのものが失敗したら、実行時に同じ書き換えが走って同じ形で落ちる
+        return
+    if leftover is None:
+        return
+    raise NotSupportedError(
+        "this correlated EXISTS cannot be rewritten as a join and is not supported: "
+        f"EXISTS ({leftover.this.sql(dialect=SQL_DIALECT)}); "
+        "the correlation condition must be a conjunction of comparisons in the "
+        "subquery's WHERE with at least one equality. Rewrite it as a comparison "
+        "against an aggregate, e.g. SELECT s.id FROM s WHERE s.id < "
+        "(SELECT MAX(u.id) FROM u), or as a join, e.g. SELECT DISTINCT s.id "
+        "FROM s JOIN u ON u.id > s.id"
+    )
+
+
 def _needs_rewrite(ast: exp.Expression) -> bool:
     if ast.find(exp.Limit, exp.Offset, exp.Exists) is not None:
         return True
@@ -633,6 +674,7 @@ def rewrite_subqueries(
             _materialize(node, f"{_SYNTHETIC_PREFIX}{index}", columns, rows, tables, schema)
     if ast.find(exp.Limit, exp.Offset) is not None:
         raise NotSupportedError("LIMIT / OFFSET in this position is not supported")
+    _reject_unnestable_exists(ast)
     return ast
 
 
